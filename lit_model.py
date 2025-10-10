@@ -4,6 +4,7 @@ import lightning as L
 from torch import Tensor
 from typing import Any
 import matplotlib.pyplot as plt
+from model import ViT
 
 
 class LitClassification(L.LightningModule):
@@ -25,35 +26,55 @@ class LitClassification(L.LightningModule):
         if input_shape is not None:
             self.example_input_array = torch.randn(input_shape)
 
+        self.lb = isinstance(self.model, ViT) and getattr(self.model, "load_balancing", False)
+
+
+
+
     def forward(self, x: Tensor) -> Tensor:
         return self.model(x)
 
 
     def training_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> Tensor:
         x, y = batch
-        preds = self.forward(x)
-        loss = self.loss_fn(preds, y)
-        acc = (preds.argmax(dim=1) == y).float().mean()
 
+        if self.lb:
+            preds, lb = self.forward(x)
+            loss = self.loss_fn(preds, y) + 0.1 * lb
+        else:
+           preds = self.forward(x)
+           loss = self.loss_fn(preds, y)
+
+        acc = (preds.argmax(dim=1) == y).float().mean()
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log("train_acc", acc, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
     def validation_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
         x, y = batch
-        preds = self.forward(x)
-        loss = self.loss_fn(preds, y)
-        acc = (preds.argmax(dim=1) == y).float().mean()
 
+        if self.lb:
+            preds, lb = self.forward(x)
+            loss = self.loss_fn(preds, y) + 0.1 * lb
+        else:
+           preds = self.forward(x)
+           loss = self.loss_fn(preds, y)
+
+        acc = (preds.argmax(dim=1) == y).float().mean()
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
         self.log("val_acc", acc, on_epoch=True, prog_bar=True)
 
     def test_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
         x, y = batch
-        preds = self.forward(x)
-        loss = self.loss_fn(preds, y)
-        acc = (preds.argmax(dim=1) == y).float().mean()
 
+        if self.lb:
+            preds, lb = self.forward(x)
+            loss = self.loss_fn(preds, y) + 0.1 * lb
+        else:
+           preds = self.forward(x)
+           loss = self.loss_fn(preds, y)
+
+        acc = (preds.argmax(dim=1) == y).float().mean()
         self.log("test_loss", loss)
         self.log("test_acc", acc)
 

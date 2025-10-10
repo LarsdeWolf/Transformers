@@ -98,7 +98,15 @@ def main(dataset_name: str = "flowers102", log_graph=False):
     #     save_train=10
     # )
 
+    logger = TensorBoardLogger("lightning_logs", name=dataset_name + '/' + lit_model.__class__.__name__, log_graph=log_graph)
     # Trainer with early stopping
+    checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
+        dirpath=f"{logger.log_dir}/checkpoints/",          # where to save
+        filename="epoch{epoch:03d}",     # filename pattern
+        save_top_k=3,                   # save all (or limit)
+        every_n_epochs=10,                # <--- save every 10 epochs
+        monitor='val_loss'
+    )
     early_stop = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min")
     logger = TensorBoardLogger("lightning_logs", name=dataset_name + '/' + lit_model.__class__.__name__, log_graph=log_graph)
     trainer = L.Trainer(
@@ -107,7 +115,7 @@ def main(dataset_name: str = "flowers102", log_graph=False):
         enable_model_summary=True,
         max_epochs=100,
         enable_progress_bar=True,
-        callbacks=[early_stop] if val_loader is not None else [],
+        callbacks=[checkpoint_callback, early_stop] if val_loader is not None else [checkpoint_callback],
     )
 
     trainer.fit(model=lit_model, train_dataloaders=train_loader, val_dataloaders=val_loader)
