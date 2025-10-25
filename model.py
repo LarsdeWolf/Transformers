@@ -97,9 +97,8 @@ class MoE(nn.Module):
                 out[mask] += (gate_weights[mask][:, exp].unsqueeze(-1) * out_exp)
 
         if self.return_lb:
-            return out, gate_weights, gate_idx
-        else:
-            return out, None, None
+            return out, [gate_weights, gate_idx]
+        return out, [None, None]
 
     @staticmethod
     def load_balancing_loss(gate_weights: torch.Tensor, gate_idx: torch.Tensor, num_experts: int):
@@ -202,7 +201,11 @@ class TransformerBlock(nn.Module):
         res = x
         if self.pre_ln:
             x = self.ln2(x)
-        x, gate_weights, gate_idx = self.mlp(x)
+        x = self.mlp(x)
+        if self.lb:
+            x, (gate_weights, gate_idx) = x
+        else:
+            gate_weights, gate_idx = None, None
         x = res + self.dropout(x)
         if not self.pre_ln:
             x = self.ln2(x)
@@ -297,12 +300,10 @@ class ViT(nn.Module):
         x = x[:, 0] if self.class_token else x.mean(dim=1)
         x = self.output(x) if not self.disable_head else x
 
-        if self.return_scores:
-            att_scores = torch.stack(att_scores, dim=1)
-            return x, att_scores
-        if self.load_balancing:
-            return x, (sum(lb_losses) / len(lb_losses))
-        return x
+
+        att_scores = torch.stack(att_scores, dim=1) if self.return_scores else None
+        lb_loss = (sum(lb_losses) / len(lb_losses)) if self.load_balancing else None
+        return x, att_scores, lb_loss
 
     def patchify(self, x: Tensor) -> Tensor:
         n_patch = self.n_patch - 1 if self.class_token else self.n_patch

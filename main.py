@@ -66,13 +66,13 @@ def main(dataset_name: str = "flowers102", log_graph=False):
     # Load datasets
     datasets_out, cfg = get_datasets(dataset_name)
 
-    train_loader = DataLoader(datasets_out["train"], batch_size=128, shuffle=True, num_workers=6, persistent_workers=True, pin_memory=True)
+    train_loader = DataLoader(datasets_out["train"], batch_size=128, shuffle=True, num_workers=3, persistent_workers=True, pin_memory=False)
     val_loader = (
-        DataLoader(datasets_out["val"], batch_size=128, shuffle=False, num_workers=3, persistent_workers=True, pin_memory=True)
+        DataLoader(datasets_out["val"], batch_size=128, shuffle=False, num_workers=3, persistent_workers=True, pin_memory=False)
         if datasets_out["val"] is not None
         else None
     )
-    test_loader = DataLoader(datasets_out["test"], batch_size=128, shuffle=False, num_workers=6, persistent_workers=True, pin_memory=True)
+    test_loader = DataLoader(datasets_out["test"], batch_size=128, shuffle=False, num_workers=3, persistent_workers=True, pin_memory=False)
 
     # Determine input channels from dataset
     sample, _ = datasets_out["train"][0]
@@ -81,11 +81,11 @@ def main(dataset_name: str = "flowers102", log_graph=False):
 
     lit_model = LitClassification(model= ViT(x_dim=[1, c, h, w],
                                              patch_dim=h // 7,
-                                             d_emb=256,
-                                             n_heads=1,
+                                             d_emb=144,
+                                             n_heads=4,
                                              n_blocks=1,
                                              n_class=cfg['num_classes'],
-                                             class_token=True,
+                                             class_token=False,
                                              num_exp=4
                                              ),
                                   loss_fn=nn.CrossEntropyLoss(),
@@ -108,7 +108,6 @@ def main(dataset_name: str = "flowers102", log_graph=False):
         monitor='val_loss'
     )
     early_stop = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min")
-    logger = TensorBoardLogger("lightning_logs", name=dataset_name + '/' + lit_model.__class__.__name__, log_graph=log_graph)
     trainer = L.Trainer(
         logger=logger,
        #precision="bf16-mixed", #"16-mixed",

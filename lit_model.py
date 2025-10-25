@@ -28,22 +28,15 @@ class LitClassification(L.LightningModule):
 
         self.lb = isinstance(self.model, ViT) and getattr(self.model, "load_balancing", False)
 
-
-
-
     def forward(self, x: Tensor) -> Tensor:
         return self.model(x)
 
 
     def training_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> Tensor:
         x, y = batch
-
-        if self.lb:
-            preds, lb = self.forward(x)
-            loss = self.loss_fn(preds, y) + 0.1 * lb
-        else:
-           preds = self.forward(x)
-           loss = self.loss_fn(preds, y)
+        preds, scores, lb = self.forward(x)
+        loss = self.loss_fn(preds, y)
+        if self.lb: loss = loss + 0.1 * lb
 
         acc = (preds.argmax(dim=1) == y).float().mean()
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -52,13 +45,9 @@ class LitClassification(L.LightningModule):
 
     def validation_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
         x, y = batch
-
-        if self.lb:
-            preds, lb = self.forward(x)
-            loss = self.loss_fn(preds, y) + 0.1 * lb
-        else:
-           preds = self.forward(x)
-           loss = self.loss_fn(preds, y)
+        preds, scores, lb = self.forward(x)
+        loss = self.loss_fn(preds, y)
+        if self.lb: loss = loss + 0.1 * lb
 
         acc = (preds.argmax(dim=1) == y).float().mean()
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
@@ -66,13 +55,9 @@ class LitClassification(L.LightningModule):
 
     def test_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
         x, y = batch
-
-        if self.lb:
-            preds, lb = self.forward(x)
-            loss = self.loss_fn(preds, y) + 0.1 * lb
-        else:
-           preds = self.forward(x)
-           loss = self.loss_fn(preds, y)
+        preds, scores, lb = self.forward(x)
+        loss = self.loss_fn(preds, y)
+        if self.lb: loss = loss + 0.1 * lb
 
         acc = (preds.argmax(dim=1) == y).float().mean()
         self.log("test_loss", loss)
