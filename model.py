@@ -68,13 +68,13 @@ class MoE(nn.Module):
         hidden_act: type[nn.Module] = nn.ReLU,
         top_k: int = 2,
         p_dropout: float = 0.,
-        return_lb: bool = False,
+        return_weights: bool = False,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
-        self.return_lb = return_lb
+        self.return_weights = return_weights
 
         self.experts = nn.ModuleList([
             MLP(input_dim, hidden_dims, out_dim, hidden_act, p_dropout=p_dropout)
@@ -88,31 +88,37 @@ class MoE(nn.Module):
         gate_weights = self.softmax(self.gate(x))
         gate_idx = torch.topk(gate_weights, self.top_k, -1)[1]
 
-        out = torch.zeros_like(x)
+        out_tokens = torch.zeros_like(x)
         for exp in range(self.num_experts):
             mask = (gate_idx == exp).any(-1) # [B, S]
             if mask.any():
                 tokens = x[mask] # [N, D]
                 out_exp = self.experts[exp](tokens)
-                out[mask] += (gate_weights[mask][:, exp].unsqueeze(-1) * out_exp)
+                out_tokens[mask] += (gate_weights[mask][:, exp].unsqueeze(-1) * out_exp)
 
-        if self.return_lb:
-            return out, [gate_weights, gate_idx]
-        return out, [None, None]
+        if self.return_weights:
+            out_tokens.__setattr__('gate_weights', gate_weights)
+            out_tokens.__setattr__('gate_idx', gate_idx)
+
+        return out_tokens
+
 
     @staticmethod
     def load_balancing_loss(gate_weights: torch.Tensor, gate_idx: torch.Tensor, num_experts: int):
         # Importance: sum of probabilities per expert
-        importance = gate_weights.sum(dim=0)  # [num_experts]
-        importance_loss = (importance / importance.sum() - 1.0 / num_experts).pow(2).sum() * num_experts
+        importance = gate_weights.sum(dim=[0, 1])  # [num_experts]
+        importance = importance / importance.sum()
 
         # Load: number of tokens routed to each expert
         load = torch.zeros(num_experts, device=gate_weights.device)
         for e in range(num_experts):
-            load[e] = (gate_idx == e).any(dim=1).float().sum()
-        load_loss = (load / load.sum() - 1.0 / num_experts).pow(2).sum() * num_experts
+            load[e] = (gate_idx == e).any(dim=-1).float().sum()
+        load = load / load.sum()
 
-        return importance_loss + load_loss
+        loss = num_experts * ((importance - 1.0 / num_experts) ** 2 +
+                              (load - 1.0 / num_experts) ** 2).sum()
+
+        return loss
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -146,10 +152,13 @@ class MultiHeadSelfAttention(nn.Module):
         if mask is not None:
             x = x.masked_fill(mask == 0, float("-inf"))
         # attention scores
-        x = x.softmax(-1)
-        scores = x if self.return_scores else None
-        x = (x @ v).permute(0, 2, 1, 3).reshape(B, S, D)
-        return self.output(x), scores
+        scores = x.softmax(-1)
+        x = (scores @ v).permute(0, 2, 1, 3).reshape(B, S, D)
+        x = self.output(x)
+        
+        if self.return_scores: 
+            x.__setattr__('scores', scores)
+        return x
 
     @staticmethod
     def _init_weights(m: nn.Module) -> None:
@@ -171,18 +180,19 @@ class TransformerBlock(nn.Module):
         att_dropout: float = 0.0,
         mlp_dropout: float = 0.0,
         pre_ln: bool = True,
-        return_scores: bool = False,
+        return_attscores: bool = False,
+        lb_weights: bool = False,
         num_exp: int = 1,
-        lb: bool = False,
     ) -> None:
         super().__init__()
+        assert (not lb_weights) or (num_exp > 1), 'use num_exp > 1 to return weights'
         self.pre_ln = pre_ln
-        self.return_scores = return_scores
-        self.lb = lb
+        self.return_attscores = return_attscores
+        self.lb_weights = lb_weights
 
-        self.mhsa = MultiHeadSelfAttention(d_emb, n_heads, self.return_scores)
+        self.mhsa = MultiHeadSelfAttention(d_emb, n_heads, self.return_attscores)
         if num_exp > 1:
-            self.mlp = MoE(d_emb, [(mlp_factor * d_emb) // num_exp], d_emb, num_exp, return_lb=self.lb)
+            self.mlp = MoE(d_emb, [(mlp_factor * d_emb) // num_exp], d_emb, num_exp, return_weights=self.lb_weights)
         else:
             self.mlp = MLP(d_emb, [mlp_factor * d_emb], d_emb, act_fn, p_dropout=mlp_dropout)
         self.ln1 = nn.LayerNorm(d_emb)
@@ -190,10 +200,13 @@ class TransformerBlock(nn.Module):
         self.dropout = nn.Dropout(att_dropout)
 
     def forward(self, x: Tensor) -> tuple[Union[Tensor, Any], Any, list[Any]]:
+        outputs = {}
         res = x
         if self.pre_ln:
             x = self.ln1(x)
-        x, scores = self.mhsa(x)
+        x = self.mhsa(x)
+        if self.return_attscores:
+            outputs['scores'] = x.scores
         x = res + self.dropout(x)
         if not self.pre_ln:
             x = self.ln1(x)
@@ -202,15 +215,15 @@ class TransformerBlock(nn.Module):
         if self.pre_ln:
             x = self.ln2(x)
         x = self.mlp(x)
-        if self.lb:
-            x, (gate_weights, gate_idx) = x
-        else:
-            gate_weights, gate_idx = None, None
+        if self.lb_weights:
+            outputs['gate_weights'], outputs['gate_idx'] = x.gate_weights, x.gate_idx
         x = res + self.dropout(x)
         if not self.pre_ln:
             x = self.ln2(x)
-
-        return x, scores, [gate_weights, gate_idx]
+        
+        for k, v in outputs.items():
+            x.__setattr__(k, v)
+        return x
 
 
 class ViT(nn.Module):
@@ -232,16 +245,21 @@ class ViT(nn.Module):
         pre_ln: bool = True,
         learned_encodings: bool = True,
         disable_head: bool = False,
-        return_scores: bool = False,
+        return_attscores: bool = False,
+        return_moescores: bool = False,
         num_exp: int = 1,
+        lb_loss: bool = False,
     ) -> None:
         super().__init__()
+        assert (not lb_loss) or num_exp > 1, 'use num_exp > 1 to enable lb_loss'
         self.input_size = x_dim
         self.d_emb = d_emb
-        self.return_scores = return_scores
+        self.return_attscores = return_attscores
+        self.return_moescores = return_moescores
         self.disable_head = disable_head
         self.learned_encodings = learned_encodings
-        self.load_balancing = True if num_exp > 1 else False
+        self.lb_loss = lb_loss
+        self.num_exp = num_exp
 
         _, self.x_c, self.x_h, self.x_w = x_dim
         self.p_dim = patch_dim
@@ -269,9 +287,9 @@ class ViT(nn.Module):
                 att_dropout=att_dropout,
                 mlp_dropout=mlp_dropout,
                 pre_ln=pre_ln,
-                return_scores=return_scores,
+                return_attscores=return_attscores,
                 num_exp=num_exp,
-                lb=self.load_balancing
+                lb_weights=self.lb_loss
             )
             for _ in range(n_blocks)
         )
@@ -290,20 +308,24 @@ class ViT(nn.Module):
 
         att_scores = []
         lb_losses = []
+        moe_scores = []
         for block in self.blocks:
-            x, scores, (gate_weights, gate_idx) = block(x)
-            if scores is not None:
-                att_scores.append(scores)
-            if self.load_balancing:
-                lb_losses.append(block.mlp.load_balancing_loss(gate_weights, gate_idx, block.mlp.num_experts))
+            x = block(x)
+
+            if self.return_attscores:
+                att_scores.append(x.scores)
+            if self.lb_loss:
+                lb_losses.append(block.mlp.load_balancing_loss(x.gate_weights, x.gate_idx, block.mlp.num_experts))
+            if self.return_moescores:
+                moe_scores.append(x.gate_idx)
 
         x = x[:, 0] if self.class_token else x.mean(dim=1)
         x = self.output(x) if not self.disable_head else x
 
-
-        att_scores = torch.stack(att_scores, dim=1) if self.return_scores else None
-        lb_loss = (sum(lb_losses) / len(lb_losses)) if self.load_balancing else None
-        return x, att_scores, lb_loss
+        if self.return_attscores: x.__setattr__('att_scores', torch.stack(att_scores, dim=1))
+        if self.lb_loss: x.__setattr__('lb_loss', (sum(lb_losses) / len(lb_losses)))
+        if self.return_moescores: x.__setattr__('moe_scores', torch.stack(moe_scores, dim=1))
+        return x
 
     def patchify(self, x: Tensor) -> Tensor:
         n_patch = self.n_patch - 1 if self.class_token else self.n_patch

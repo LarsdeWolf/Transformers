@@ -18,48 +18,59 @@ class LitClassification(L.LightningModule):
         wd: float = 0.3,
         epochs: int = 100,
         input_shape: tuple[int, int, int, int] = None,
+        scheduler: nn.Module = None,
     ) -> None:
         super().__init__()
-        self.save_hyperparameters(ignore=["model", "loss_fn"])  # store all args in hparams
+        self.save_hyperparameters(ignore=["model", "loss_fn", "scheduler"])  
         self.model = model
         self.loss_fn = loss_fn
+        self.scheduler = scheduler
+        
         if input_shape is not None:
             self.example_input_array = torch.randn(input_shape)
-
-        self.lb = isinstance(self.model, ViT) and getattr(self.model, "load_balancing", False)
+        self.lb = isinstance(self.model, ViT) and getattr(self.model, "lb_loss", False)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.model(x)
 
-
     def training_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> Tensor:
         x, y = batch
-        preds, scores, lb = self.forward(x)
-        loss = self.loss_fn(preds, y)
-        if self.lb: loss = loss + 0.1 * lb
+        x = self.forward(x)
+        loss = self.loss_fn(x, y)
+        if self.lb:
+            loss = loss + x.lb_loss
+            self.log('lb_loss', x.lb_loss, on_step=True, on_epoch=False, prog_bar=True)
 
-        acc = (preds.argmax(dim=1) == y).float().mean()
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train_acc", acc, on_step=True, on_epoch=True, prog_bar=True)
+        # if self.model.return_moescores:
+        #     scores = x.moe_scores
+        #     counts = {}
+        #     for e in range(self.model.num_exp):
+        #         counts[f'Expert {e}'] = (scores == e).sum()
+        #     self.log_dict(counts, on_step=True)
+        #     self.log
+
+        acc = (x.argmax(dim=1) == y).float().mean()
+        self.log("train_loss", loss, on_step=True, on_epoch=False, prog_bar=True)
+        self.log("train_acc", acc, on_step=True, on_epoch=False, prog_bar=True)
         return loss
 
     def validation_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
         x, y = batch
-        preds, scores, lb = self.forward(x)
-        loss = self.loss_fn(preds, y)
-        if self.lb: loss = loss + 0.1 * lb
+        x = self.forward(x)
+        loss = self.loss_fn(x, y)
+        if self.lb: loss = loss + x.lb_loss
 
-        acc = (preds.argmax(dim=1) == y).float().mean()
+        acc = (x.argmax(dim=1) == y).float().mean()
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
         self.log("val_acc", acc, on_epoch=True, prog_bar=True)
 
     def test_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
         x, y = batch
-        preds, scores, lb = self.forward(x)
-        loss = self.loss_fn(preds, y)
-        if self.lb: loss = loss + 0.1 * lb
+        x = self.forward(x)
+        loss = self.loss_fn(x, y)
+        if self.lb: loss = loss + x.lb_loss
 
-        acc = (preds.argmax(dim=1) == y).float().mean()
+        acc = (x.argmax(dim=1) == y).float().mean()
         self.log("test_loss", loss)
         self.log("test_acc", acc)
 
@@ -76,13 +87,13 @@ class LitClassification(L.LightningModule):
         optimizer = torch.optim.AdamW(
             self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.wd
         )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=self.hparams.epochs
-        )
+
+        if self.scheduler is None:
+            return {"optimizer": optimizer} 
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": scheduler,
+                "scheduler": self.scheduler,
                 "interval": "epoch",
                 "frequency": 1,
             },
@@ -95,6 +106,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
             decoder: nn.Module,
             lr: float = 3e-3,
             wd: float = 0.05,
+            scheduler: nn.Module = None,
             epochs: int = 100,
             mask_ratio: float = .6,
             save_train: int = 0,
@@ -106,6 +118,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
         self.encoder = encoder
         self.decoder = decoder
         self.mask_ratio = mask_ratio
+        self.scheduler = scheduler
 
         self.loss_fn = nn.MSELoss()
         self.enc_todec = nn.Linear(self.encoder.d_emb, self.decoder.d_emb)
@@ -261,13 +274,12 @@ class LitMaskedAutoEncoder(L.LightningModule):
         optimizer = torch.optim.AdamW(
             self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.wd
         )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=self.hparams.epochs
-        )
+        if self.scheduler is None:
+            return {"optimizer": optimizer} 
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": scheduler,
+                "scheduler": self.scheduler,
                 "interval": "epoch",
                 "frequency": 1,
             },

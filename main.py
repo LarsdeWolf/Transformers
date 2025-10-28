@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 import lightning as L
-from torchvision import datasets, transforms
+from torchvision import datasets
+from torchvision.transforms import v2
+
 from torch.utils.data import DataLoader
 from pytorch_lightning.loggers import TensorBoardLogger
 from model import ViT, MLP, MoE
@@ -40,12 +42,16 @@ DATASETS = {
 def get_datasets(name: str, root: str = "./data"):
     """Return train/val/test datasets for a given dataset name."""
     cfg = DATASETS[name.lower()]
-
-    transform = transforms.Compose(
+    transform = v2.Compose(
         [
-            transforms.ToTensor(),
-            transforms.Resize(cfg["resize"]),
-            transforms.Normalize(cfg["mean"], cfg["std"]),
+            v2.ToTensor(),
+            v2.Resize(cfg["resize"]),
+        ] + 
+        [
+            augment for augment in AUGMENTS
+        ] +
+        [
+            v2.Normalize(cfg["mean"], cfg["std"])
         ]
     )
 
@@ -62,10 +68,8 @@ def get_datasets(name: str, root: str = "./data"):
     return datasets_out, cfg
 
 
-def main(dataset_name: str = "flowers102", log_graph=False):
-    # Load datasets
+def main(model, config, dataset_name: str = "flowers102", log_graph=False):
     datasets_out, cfg = get_datasets(dataset_name)
-
     train_loader = DataLoader(datasets_out["train"], batch_size=128, shuffle=True, num_workers=3, persistent_workers=True, pin_memory=False)
     val_loader = (
         DataLoader(datasets_out["val"], batch_size=128, shuffle=False, num_workers=3, persistent_workers=True, pin_memory=False)
@@ -74,37 +78,35 @@ def main(dataset_name: str = "flowers102", log_graph=False):
     )
     test_loader = DataLoader(datasets_out["test"], batch_size=128, shuffle=False, num_workers=3, persistent_workers=True, pin_memory=False)
 
-    # Determine input channels from dataset
     sample, _ = datasets_out["train"][0]
     c, h, w = list(sample.shape)
+    if model == LitClassification:
+        encoder, config = config['Encoder']
+        model = model(
+            model=encoder(x_dim=[1, c, h, w], n_class=cfg['num_classes'], **config),
+            lr=LR,
+            wd=WD,
+            epochs=N_EPOCH,
+            scheduler=SCHEDULER
+        )
+    else:
+        model = model(
+            encoder=config['Encoder'][0](x_dim=[1, c, h, w], n_class=cfg['num_classes'], **config['Encoder'][1]),
+            decoder=config['Decoder'][0](x_dim=[1, c, h, w], n_class=cfg['num_classes'], **config['Decoder'][1]),
+            lr=LR,
+            wd=WD,
+            epochs=N_EPOCH,
+            scheduler=SCHEDULER,
+            **config['MISC']
+        )
 
 
-    lit_model = LitClassification(model= ViT(x_dim=[1, c, h, w],
-                                             patch_dim=h // 7,
-                                             d_emb=144,
-                                             n_heads=4,
-                                             n_blocks=1,
-                                             n_class=cfg['num_classes'],
-                                             class_token=False,
-                                             num_exp=4
-                                             ),
-                                  loss_fn=nn.CrossEntropyLoss(),
-                                  wd=.1)
-    # lit_model = LitMaskedAutoEncoder(
-    #     ViT([64, 1, 128, 128], 4, 500, 6,4, cfg['num_classes'], return_scores=False,
-    #         disable_head=True, class_token=False, learned_encodings=False, num_exp=8),
-    #     ViT([64, 3, 28, 28], 4, 256, 4, 4, 10, return_scores=False,
-    #         disable_head=True, class_token=False, learned_encodings=False, num_exp=500),
-    #     save_train=10
-    # )
-
-    logger = TensorBoardLogger("lightning_logs", name=dataset_name + '/' + lit_model.__class__.__name__, log_graph=log_graph)
-    # Trainer with early stopping
+    logger = TensorBoardLogger("lightning_logs", name=dataset_name + '/' + model.__class__.__name__, log_graph=log_graph)
     checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
-        dirpath=f"{logger.log_dir}/checkpoints/",          # where to save
-        filename="epoch{epoch:03d}",     # filename pattern
-        save_top_k=3,                   # save all (or limit)
-        every_n_epochs=10,                # <--- save every 10 epochs
+        dirpath=f"{logger.log_dir}/checkpoints/",          
+        filename="epoch{epoch:03d}",    
+        save_top_k=3,                 
+        every_n_epochs=10,            
         monitor='val_loss'
     )
     early_stop = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min")
@@ -112,15 +114,67 @@ def main(dataset_name: str = "flowers102", log_graph=False):
         logger=logger,
        #precision="bf16-mixed", #"16-mixed",
         enable_model_summary=True,
-        max_epochs=100,
+        max_epochs=N_EPOCH,
         enable_progress_bar=True,
         callbacks=[checkpoint_callback, early_stop] if val_loader is not None else [checkpoint_callback],
     )
 
-    trainer.fit(model=lit_model, train_dataloaders=train_loader, val_dataloaders=val_loader)
-    trainer.test(lit_model, dataloaders=test_loader)
+    trainer.fit(model=model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    trainer.test(model, dataloaders=test_loader)
 
 
 if __name__ == "__main__":
-    # Switch dataset here: "flowers102", "mnist", "cifar10"
-    main("mnist")
+    # TRAIN PARAMS
+    N_BATCH = 32
+    N_EPOCH = 5
+    N_WORKERS = 3
+
+    # DATA PARAMS
+    N_TRAIN = 0
+    AUGMENTS = []
+
+    # LEARN PARAMS
+    LR = 3e-4
+    WD = .05
+    SCHEDULER = None 
+
+    model, config = LitClassification, {
+        'Encoder': (ViT, {
+            'patch_dim': 7,
+            'd_emb': 250,
+            'n_heads': 1,
+            'n_blocks': 1,
+            'class_token': False,
+            'num_exp': 14,
+            'lb_loss': True,
+            'return_attscores': True,
+            'return_moescores': True,
+            'att_dropout': .1,
+            'mlp_dropout': .1,
+            })
+    }
+
+    # model, config = LitMaskedAutoEncoder, {
+    #     'Encoder': (ViT, {
+    #         'd_emb': 250,
+    #         'n_heads': 1,
+    #         'n_blocks': 1,
+    #         'class_token': False,
+    #         'disable_head': True,
+    #         'num_exp': 1,
+    #         'att_dropout': .1,
+    #         'mlp_dropout': .1,
+    #     }),
+    #     'Decoder': (ViT, {
+    #         'd_emb': 250,
+    #         'n_heads': 1,
+    #         'n_blocks': 1,
+    #         'class_token': False,
+    #         'num_exp': 1,
+    #         'att_dropout': .1,
+    #         'mlp_dropout': .1,
+    #     }),
+    #     'Misc': {'save_train': 10}
+    # }            
+    
+    main(model, config, "mnist")
