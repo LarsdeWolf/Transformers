@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 from typing import Optional, Union, Any
 from utils import get_2d_sincos_pos_embed
@@ -9,7 +10,6 @@ class MLP(nn.Module):
     """
     Multi-Layer Perceptron (MLP).
     """
-
     def __init__(
         self,
         input_dim: int,
@@ -55,6 +55,7 @@ class MLP(nn.Module):
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
+
 class MoE(nn.Module):
     """
 
@@ -85,16 +86,18 @@ class MoE(nn.Module):
         self.softmax = nn.Softmax(-1)
 
     def forward(self, x):
-        gate_weights = self.softmax(self.gate(x))
+        gate_weights = self.gate(x)
         gate_idx = torch.topk(gate_weights, self.top_k, -1)[1]
+        mask = torch.zeros_like(gate_weights, dtype=torch.bool).scatter(-1, gate_idx, True)
+        gate_weights = self.softmax(gate_weights.masked_fill(~mask, float('-inf')))
 
         out_tokens = torch.zeros_like(x)
         for exp in range(self.num_experts):
             mask = (gate_idx == exp).any(-1) # [B, S]
             if mask.any():
                 tokens = x[mask] # [N, D]
-                out_exp = self.experts[exp](tokens)
-                out_tokens[mask] += (gate_weights[mask][:, exp].unsqueeze(-1) * out_exp)
+                tokens = self.experts[exp](tokens)
+                out_tokens[mask] += (gate_weights[mask][:, exp].unsqueeze(-1) * tokens)
 
         if self.return_weights:
             out_tokens.__setattr__('gate_weights', gate_weights)
@@ -113,11 +116,10 @@ class MoE(nn.Module):
         load = torch.zeros(num_experts, device=gate_weights.device)
         for e in range(num_experts):
             load[e] = (gate_idx == e).any(dim=-1).float().sum()
-        load = load / load.sum()
+        load = load / (load.sum() + 1e-10)
 
-        loss = num_experts * ((importance - 1.0 / num_experts) ** 2 +
-                              (load - 1.0 / num_experts) ** 2).sum()
-
+        # Coefficient of variation loss
+        loss = num_experts * (importance * load).sum()
         return loss
 
 
@@ -383,10 +385,11 @@ if __name__=='__main__':
                 4,
                 2,
                 10,
-                return_scores=False,
+                return_attscores=False,
                 disable_head=False,
                 class_token=True,
                 learned_encodings=False,
-                num_exp=5)
+                num_exp=5,
+                lb_loss = True)
     model(inp)
     print()

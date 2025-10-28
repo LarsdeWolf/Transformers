@@ -70,13 +70,13 @@ def get_datasets(name: str, root: str = "./data"):
 
 def main(model, config, dataset_name: str = "flowers102", log_graph=False):
     datasets_out, cfg = get_datasets(dataset_name)
-    train_loader = DataLoader(datasets_out["train"], batch_size=128, shuffle=True, num_workers=3, persistent_workers=True, pin_memory=False)
+    train_loader = DataLoader(datasets_out["train"], batch_size=N_BATCH, shuffle=True, num_workers=N_WORKERS, persistent_workers=True, pin_memory=False)
     val_loader = (
-        DataLoader(datasets_out["val"], batch_size=128, shuffle=False, num_workers=3, persistent_workers=True, pin_memory=False)
+        DataLoader(datasets_out["val"], batch_size=N_BATCH, shuffle=False, num_workers=N_WORKERS, persistent_workers=True, pin_memory=False)
         if datasets_out["val"] is not None
         else None
     )
-    test_loader = DataLoader(datasets_out["test"], batch_size=128, shuffle=False, num_workers=3, persistent_workers=True, pin_memory=False)
+    test_loader = DataLoader(datasets_out["test"], batch_size=N_BATCH, shuffle=False, num_workers=N_WORKERS, persistent_workers=True, pin_memory=False)
 
     sample, _ = datasets_out["train"][0]
     c, h, w = list(sample.shape)
@@ -109,7 +109,8 @@ def main(model, config, dataset_name: str = "flowers102", log_graph=False):
         every_n_epochs=10,            
         monitor='val_loss'
     )
-    early_stop = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min")
+    monitor = 'val_loss' if val_loader else 'train_loss'
+    early_stop = L.pytorch.callbacks.EarlyStopping(monitor="monitor", patience=5, mode="min")
     trainer = L.Trainer(
         logger=logger,
        #precision="bf16-mixed", #"16-mixed",
@@ -138,43 +139,50 @@ if __name__ == "__main__":
     WD = .05
     SCHEDULER = None 
 
-    model, config = LitClassification, {
+    # model, config = LitClassification, {
+    #     'Encoder': (ViT, {
+    #         'patch_dim': 7,
+    #         'd_emb': 80,
+    #         'n_heads': 2,
+    #         'n_blocks': 2,
+    #         'class_token': False,
+    #         'num_exp': 5,
+    #         'lb_loss': True,
+    #         'return_attscores': True,
+    #         'return_moescores': True,
+    #         'att_dropout': .1,
+    #         'mlp_dropout': .1,
+    #         })
+    # }
+
+    model, config = LitMaskedAutoEncoder, {
         'Encoder': (ViT, {
-            'patch_dim': 7,
-            'd_emb': 250,
-            'n_heads': 1,
-            'n_blocks': 1,
+            'd_emb': 140,
+            'patch_dim': 4,
+            'n_heads': 2,
+            'n_blocks': 2,
             'class_token': False,
-            'num_exp': 14,
+            'disable_head': True,
+            'num_exp': 4,
             'lb_loss': True,
-            'return_attscores': True,
             'return_moescores': True,
             'att_dropout': .1,
             'mlp_dropout': .1,
-            })
+        }),
+        'Decoder': (ViT, {
+            'd_emb': 140,
+            'patch_dim': 4,
+            'n_heads': 2,
+            'n_blocks': 2,
+            'class_token': False,
+            'disable_head': True,
+            'num_exp': 4,
+            'lb_loss': True,
+            'return_moescores': True,
+            'att_dropout': .1,
+            'mlp_dropout': .1,
+        }),
+        'MISC': {'save_train': 10}
     }
-
-    # model, config = LitMaskedAutoEncoder, {
-    #     'Encoder': (ViT, {
-    #         'd_emb': 250,
-    #         'n_heads': 1,
-    #         'n_blocks': 1,
-    #         'class_token': False,
-    #         'disable_head': True,
-    #         'num_exp': 1,
-    #         'att_dropout': .1,
-    #         'mlp_dropout': .1,
-    #     }),
-    #     'Decoder': (ViT, {
-    #         'd_emb': 250,
-    #         'n_heads': 1,
-    #         'n_blocks': 1,
-    #         'class_token': False,
-    #         'num_exp': 1,
-    #         'att_dropout': .1,
-    #         'mlp_dropout': .1,
-    #     }),
-    #     'Misc': {'save_train': 10}
-    # }            
     
     main(model, config, "mnist")
