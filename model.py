@@ -329,39 +329,53 @@ class ViT(nn.Module):
         if self.return_moescores: x.__setattr__('moe_scores', torch.stack(moe_scores, dim=1))
         return x
 
-    def patchify(self, x: Tensor) -> Tensor:
-        n_patch = self.n_patch - 1 if self.class_token else self.n_patch
-        return (x.unfold(2, self.p_dim, self.p_dim)
-                .unfold(3, self.p_dim, self.p_dim)
-                .contiguous()
-                .view(-1, n_patch, (self.p_dim**2) * self.x_c)
-        )
-
-    def depatchify(self, patches: torch.Tensor) -> torch.Tensor:
+    def patchify(self, imgs: Tensor) -> Tensor:
         """
-        Reconstructs the original image from patches.
+        Convert a batch of images to flattened patches.
 
         Args:
-            patches: Tensor of shape (batch, n_patches, patch_size^2 * channels)
-            h: original image height
-            w: original image width
+            imgs: Tensor of shape [B, C, H, W]
 
         Returns:
-            Reconstructed image of shape (batch, channels, h, w)
+            patches: Tensor of shape [B, n_patches, patch_size^2 * C]
+                     where n_patches = (H//p) * (W//p) and p = self.p_dim
         """
-        b, _, _ = patches.shape
+        # basic shape checks
+        B, C, H, W = imgs.shape
         p = self.p_dim
-        c = self.x_c
 
-        # number of patches per row/col
-        n_h = self.x_h // p
-        n_w = self.x_w // p
+        gh = H // p
+        gw = W // p
 
-        # reshape patches into grid
-        patches = patches.view(b, n_h, n_w, p, p, c)
-        patches = patches.permute(0, 5, 1, 3, 2, 4).contiguous()
-        img = patches.view(b, c, self.x_h, self.x_w)
-        return img
+
+        patches = imgs.reshape(B, C, gh, p, gw, p)
+        patches = patches.permute(0, 2, 4, 3, 5, 1)
+        patches = patches.reshape(B, gh * gw, p * p * C)
+        return patches.contiguous()
+
+    def depatchify(self, patches: Tensor) -> Tensor:
+        """
+        Inverse of patchify: reconstruct images from flattened patches.
+
+        Args:
+            patches: Tensor of shape [B, n_patches, patch_size^2 * C]
+
+        Returns:
+            imgs: Tensor of shape [B, C, H, W]
+        """
+        B, S, D = patches.shape
+        p = self.p_dim
+        C = self.x_c
+        gh = self.x_h // p
+        gw = self.x_w // p
+
+        patches = patches.reshape(B, gh, gw, p, p, C)
+        patches = patches.permute(0, 5, 1, 3, 2, 4)
+        imgs = patches.reshape(B, C, gh * p, gw * p)
+        return imgs.contiguous()
+
+
+
 
     @staticmethod
     def _init_weights(m: nn.Module) -> None:

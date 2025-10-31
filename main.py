@@ -42,28 +42,19 @@ DATASETS = {
 def get_datasets(name: str, root: str = "./data"):
     """Return train/val/test datasets for a given dataset name."""
     cfg = DATASETS[name.lower()]
-    transform = v2.Compose(
-        [
-            v2.ToTensor(),
-            v2.Resize(cfg["resize"]),
-        ] + 
-        [
-            augment for augment in AUGMENTS
-        ] +
-        [
-            v2.Normalize(cfg["mean"], cfg["std"])
-        ]
-    )
+    transform = v2.Compose([
+        v2.ToTensor(),
+        v2.Resize(cfg["resize"]),
+        *AUGMENTS,
+        v2.Normalize(cfg["mean"], cfg["std"]),
+    ])
 
-    datasets_out = {}
-    if name.lower() == "flowers102":
-        datasets_out["train"] = cfg["cls"](root=root, split="train", download=True, transform=transform)
+    datasets_out = {
+        "train": cfg["cls"](root=root, split="train", download=True, transform=transform),
+        "test": cfg["cls"](root=root, split="test", download=True, transform=transform)
+    }
+    if 'val' in cfg['splits']:
         datasets_out["val"] = cfg["cls"](root=root, split="val", download=True, transform=transform)
-        datasets_out["test"] = cfg["cls"](root=root, split="test", download=True, transform=transform)
-    elif name.lower() in ["mnist", "cifar10"]:
-        datasets_out["train"] = cfg["cls"](root=root, train=True, download=True, transform=transform)
-        datasets_out["val"] = None  # no separate val, can split train
-        datasets_out["test"] = cfg["cls"](root=root, train=False, download=True, transform=transform)
 
     return datasets_out, cfg
 
@@ -102,15 +93,15 @@ def main(model, config, dataset_name: str = "flowers102", log_graph=False):
 
 
     logger = TensorBoardLogger("lightning_logs", name=dataset_name + '/' + model.__class__.__name__, log_graph=log_graph)
+    monitor = 'val_loss' if val_loader else 'train_loss'
     checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
         dirpath=f"{logger.log_dir}/checkpoints/",          
         filename="epoch{epoch:03d}",    
         save_top_k=3,                 
         every_n_epochs=10,            
-        monitor='val_loss'
+        monitor=monitor
     )
-    monitor = 'val_loss' if val_loader else 'train_loss'
-    early_stop = L.pytorch.callbacks.EarlyStopping(monitor="monitor", patience=5, mode="min")
+    early_stop = L.pytorch.callbacks.EarlyStopping(monitor=monitor, patience=15, mode="min")
     trainer = L.Trainer(
         logger=logger,
        #precision="bf16-mixed", #"16-mixed",

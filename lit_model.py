@@ -33,58 +33,46 @@ class LitClassification(L.LightningModule):
     def forward(self, x: Tensor) -> Tensor:
         return self.model(x)
 
-    def training_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> Tensor:
+    def _forward_step(self, batch, stage: str):
         x, y = batch
         x = self.forward(x)
         loss = self.loss_fn(x, y)
         acc = (x.argmax(dim=1) == y).float().mean()
+        if self.lb:
+            loss.lb = x.lb_loss
+        if self.model.return_moescores:
+            tb = self.logger.experiment
+            for i in range(self.model.num_exp):
+                tb.add_scalar(f'Expert_Load/{stage}-exp{i}',
+                              (x.moe_scores == i).sum().item(),
+                              self.global_step)
+        return loss, acc
+
+    def training_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> Tensor:
+        loss, acc = self._forward_step(batch, 'train')
         self.log("Loss/train", loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log("Accuracy/train", acc, on_step=True, on_epoch=True, prog_bar=True)
 
         if self.lb:
-            loss = loss + x.lb_loss
-            self.log('LB/train', x.lb_loss, on_step=True, on_epoch=True, prog_bar=False)
-            if self.model.return_moescores:
-                tb = self.logger.experiment
-                for i in range(self.model.num_exp):
-                    tb.add_scalar(f'Expert_Load/train-exp{i}',
-                                  (x.moe_scores == i).sum().item(),
-                                  self.global_step)
+            self.log('LB/train', loss.lb, on_step=True, on_epoch=True, prog_bar=False)
+            loss = loss + loss.lb
         return loss
 
     def validation_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
-        x, y = batch
-        x = self.forward(x)
-        loss = self.loss_fn(x, y)
-        acc = (x.argmax(dim=1) == y).float().mean()
-        self.log("Loss/val", loss, on_epoch=True, prog_bar=True)
-        self.log("Accuracy/val", acc, on_epoch=True, prog_bar=True)
+        loss, acc = self._forward_step(batch, 'val')
+        self.log("Loss/val", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("Accuracy/val", acc, on_step=True, on_epoch=True, prog_bar=True)
 
         if self.lb:
-            self.log('LB/val', x.lb_loss, on_step=True, on_epoch=True, prog_bar=False)
-            if self.model.return_moescores:
-                tb = self.logger.experiment
-                for i in range(self.model.num_exp):
-                    tb.add_scalar(f'Expert_Load/val-exp{i}',
-                                  (x.moe_scores == i).sum().item(),
-                                  self.global_step)
+            self.log('LB/val', loss.lb, on_step=True, on_epoch=True, prog_bar=False)
 
     def test_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
-        x, y = batch
-        x = self.forward(x)
-        loss = self.loss_fn(x, y)
-        acc = (x.argmax(dim=1) == y).float().mean()
-        self.log("Loss/test", loss)
-        self.log("Accuracy/test", acc)
+        loss, acc = self._forward_step(batch, 'test')
+        self.log("Loss/test", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("Accuracy/test", acc, on_step=True, on_epoch=True, prog_bar=True)
 
         if self.lb:
-            self.log('LB/test', x.lb_loss, on_step=True, on_epoch=True, prog_bar=False)
-            if self.model.return_moescores:
-                tb = self.logger.experiment
-                for i in range(self.model.num_exp):
-                    tb.add_scalar(f'Expert_Load/test-exp{i}',
-                                  (x.moe_scores == i).sum().item(),
-                                  self.global_step)
+            self.log('LB/test', loss.lb, on_step=True, on_epoch=True, prog_bar=False)
 
     def on_before_optimizer_step(self, optimizer):
         """Compute and log global gradient norm across all parameters."""
@@ -146,7 +134,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
         self.mask_ratio = mask_ratio
         self.scheduler = scheduler
         self.enc_lb = isinstance(self.encoder, ViT) and getattr(self.encoder, "lb_loss", False)
-        self.dec_lb = isinstance(self.encoder, ViT) and getattr(self.encoder, "lb_loss", False)
+        self.dec_lb = isinstance(self.decoder, ViT) and getattr(self.encoder, "lb_loss", False)
 
 
         self.loss_fn = nn.MSELoss()
