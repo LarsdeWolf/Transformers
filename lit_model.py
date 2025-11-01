@@ -300,8 +300,8 @@ class LitMaskedAutoEncoder(L.LightningModule):
             tensorboard = self.logger.experiment
             fig, axs = plt.subplots(2, all_preds.shape[0])
             for i in range(self.hparams.save_train):
-                axs[0, i].imshow(all_preds[i, 0].numpy())
-                axs[1, i].imshow(all_gt[i, 0].numpy())
+                axs[0, i].imshow(all_preds[i, 0].float().numpy())
+                axs[1, i].imshow(all_gt[i, 0].float().numpy())
             tensorboard.add_figure(f'Train Epoch: {self.current_epoch}', plt.gcf())
             self.train_epoch_outputs.clear()  # free memory
 
@@ -314,8 +314,8 @@ class LitMaskedAutoEncoder(L.LightningModule):
             print(f'{all_preds.shape[0]}')
             print(range(self.hparams.save_val))
             for i in range(self.hparams.save_val):
-                axs[0, i].imshow(all_preds[i, 0].numpy())
-                axs[1, i].imshow(all_gt[i, 0].numpy())
+                axs[0, i].imshow(all_preds[i, 0].float().numpy())
+                axs[1, i].imshow(all_gt[i, 0].float().numpy())
             tensorboard.add_figure(f'Val Epoch: {self.current_epoch}', plt.gcf())
             self.val_epoch_outputs.clear()  # free memory
 
@@ -328,8 +328,8 @@ class LitMaskedAutoEncoder(L.LightningModule):
             print(f'{all_preds.shape[0]}')
             print(self.hparams.save_test)
             for i in range(self.hparams.save_test):
-                axs[0, i].imshow(all_preds[i, 0].numpy())
-                axs[1, i].imshow(all_gt[i, 0].numpy())
+                axs[0, i].float().imshow(all_preds[i, 0].numpy())
+                axs[1, i].float().imshow(all_gt[i, 0].numpy())
             tensorboard.add_figure(f'Test Epoch: {self.current_epoch}', plt.gcf())
             self.test_epoch_outputs.clear()  # free memory
 
