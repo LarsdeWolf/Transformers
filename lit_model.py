@@ -11,21 +11,21 @@ class LitClassification(L.LightningModule):
     """Lightning module for training classification models."""
 
     def __init__(
-        self,
-        model: nn.Module,
-        loss_fn: nn.Module = nn.CrossEntropyLoss(),
-        lr: float = 3e-4,
-        wd: float = 0.3,
-        epochs: int = 100,
-        input_shape: tuple[int, int, int, int] = None,
-        scheduler: nn.Module = None,
+            self,
+            model: nn.Module,
+            loss_fn: nn.Module = nn.CrossEntropyLoss(),
+            lr: float = 3e-4,
+            wd: float = 0.3,
+            epochs: int = 100,
+            input_shape: tuple[int, int, int, int] = None,
+            scheduler: nn.Module = None,
     ) -> None:
         super().__init__()
-        self.save_hyperparameters(ignore=["model", "loss_fn", "scheduler"])  
+        self.save_hyperparameters(ignore=["model", "loss_fn", "scheduler"])
         self.model = model
         self.loss_fn = loss_fn
         self.scheduler = scheduler
-        
+
         if input_shape is not None:
             self.example_input_array = torch.randn(input_shape)
         self.lb = isinstance(self.model, ViT) and getattr(self.model, "lb_loss", False)
@@ -100,7 +100,7 @@ class LitClassification(L.LightningModule):
         )
 
         if self.scheduler is None:
-            return {"optimizer": optimizer} 
+            return {"optimizer": optimizer}
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -109,8 +109,6 @@ class LitClassification(L.LightningModule):
                 "frequency": 1,
             },
         }
-
-
 
 
 class LitMaskedAutoEncoder(L.LightningModule):
@@ -122,10 +120,12 @@ class LitMaskedAutoEncoder(L.LightningModule):
             wd: float = 0.05,
             scheduler: nn.Module = None,
             epochs: int = 100,
-            mask_ratio: float = .6,
+            mask_ratio: float = .5,
             save_train: int = 0,
             save_val: int = 0,
             save_test: int = 10,
+            mean: list[float, float, float] = None,
+            std: list[float, float, float] = None
     ) -> None:
         super(LitMaskedAutoEncoder, self).__init__()
         self.save_hyperparameters(ignore=["encoder", "decoder"])
@@ -135,16 +135,35 @@ class LitMaskedAutoEncoder(L.LightningModule):
         self.scheduler = scheduler
         self.enc_lb = isinstance(self.encoder, ViT) and getattr(self.encoder, "lb_loss", False)
         self.dec_lb = isinstance(self.decoder, ViT) and getattr(self.encoder, "lb_loss", False)
-
+        self.mean = mean
+        self.std = std
 
         self.loss_fn = nn.MSELoss()
         self.enc_todec = nn.Linear(self.encoder.d_emb, self.decoder.d_emb)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, self.decoder.d_emb))
-        self.to_pix = nn.Linear(self.decoder.d_emb, (self.encoder.p_dim**2) * self.encoder.x_c)
+        nn.init.trunc_normal_(self.mask_token, std=0.02)
+        self.to_pix = nn.Linear(self.decoder.d_emb, (self.encoder.p_dim ** 2) * self.encoder.x_c)
 
         self.train_epoch_outputs = []
         self.val_epoch_outputs = []
         self.test_epoch_outputs = []
+
+        self.apply(self._init_weights)
+
+    @staticmethod
+    def _init_weights(m: nn.Module) -> None:
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    @staticmethod
+    def to_img(x):
+        x = x.detach().cpu().clamp(0, 1)
+        if x.shape[0] == 1:
+            return x[0].numpy()  # grayscale
+        else:
+            return x.permute(1, 2, 0).numpy()  # RGB
 
     def forward(self, x: Tensor) -> tuple[Any, Tensor, Tensor, int]:
         # ENCODER
@@ -221,7 +240,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
         if len(self.train_epoch_outputs) < 1 and self.hparams.save_train > 0:
             preds = self.encoder.depatchify(preds)
             self.train_epoch_outputs.append([preds[:self.hparams.save_train].detach().cpu(),
-                                                x[:self.hparams.save_train].detach().cpu()])
+                                             x[:self.hparams.save_train].detach().cpu()])
         return loss
 
     def validation_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
@@ -239,7 +258,6 @@ class LitMaskedAutoEncoder(L.LightningModule):
         loss = self.loss_fn(masked, gt)
         self.log("Loss/val", loss.item(), on_epoch=True, prog_bar=True)
 
-
         if self.enc_lb: self.log('LB/val-encoder', preds.enc_lb_loss, on_step=True, on_epoch=True, prog_bar=False)
         if self.dec_lb: self.log('LB/val-decoder', preds.dec_lb_loss, on_step=True, on_epoch=True, prog_bar=False)
         tb = self.logger.experiment
@@ -255,7 +273,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
         if len(self.val_epoch_outputs) < 1 and self.hparams.save_val > 0:
             preds = self.encoder.depatchify(preds)
             self.val_epoch_outputs.append([preds[:self.hparams.save_val].detach().cpu(),
-                                                x[:self.hparams.save_val].detach().cpu()])
+                                           x[:self.hparams.save_val].detach().cpu()])
         return loss
 
     def test_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
@@ -273,7 +291,6 @@ class LitMaskedAutoEncoder(L.LightningModule):
         loss = self.loss_fn(masked, gt)
         self.log("Loss/test", loss.item())
 
-
         if self.enc_lb: self.log('LB/test-encoder', preds.enc_lb_loss, on_step=True, on_epoch=True, prog_bar=False)
         if self.dec_lb: self.log('LB/test-decoder', preds.dec_lb_loss, on_step=True, on_epoch=True, prog_bar=False)
         tb = self.logger.experiment
@@ -289,7 +306,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
         if len(self.test_epoch_outputs) < 1 and self.hparams.save_test > 0:
             preds = self.encoder.depatchify(preds)
             self.test_epoch_outputs.append([preds[:self.hparams.save_test].detach().cpu(),
-                                                x[:self.hparams.save_test].detach().cpu()])
+                                            x[:self.hparams.save_test].detach().cpu()])
 
         return loss
 
@@ -297,11 +314,20 @@ class LitMaskedAutoEncoder(L.LightningModule):
         if self.hparams.save_train > 0 and self.current_epoch % 5 == 0:
             all_preds = torch.cat([x[0] for x in self.train_epoch_outputs], dim=0)
             all_gt = torch.cat([x[1] for x in self.train_epoch_outputs], dim=0)
+
+            if self.mean and self.std:
+                all_preds = self.denormalize(all_preds, self.mean, self.std)
+                all_gt = self.denormalize(all_gt, self.mean, self.std)
+
             tensorboard = self.logger.experiment
             fig, axs = plt.subplots(2, all_preds.shape[0])
-            for i in range(self.hparams.save_train):
-                axs[0, i].imshow(all_preds[i, 0].float().numpy())
-                axs[1, i].imshow(all_gt[i, 0].float().numpy())
+
+            for i in range(min(self.hparams.save_train, all_preds.shape[0])):
+                axs[0, i].imshow(self.to_img(all_preds[i]))
+                axs[1, i].imshow(self.to_img(all_gt[i]))
+                axs[0, i].axis("off")
+                axs[1, i].axis("off")
+
             tensorboard.add_figure(f'Train Epoch: {self.current_epoch}', plt.gcf())
             self.train_epoch_outputs.clear()  # free memory
 
@@ -309,13 +335,20 @@ class LitMaskedAutoEncoder(L.LightningModule):
         if self.hparams.save_val > 0 and self.current_epoch % 5 == 0:
             all_preds = torch.cat([x[0] for x in self.val_epoch_outputs], dim=0)
             all_gt = torch.cat([x[1] for x in self.val_epoch_outputs], dim=0)
+
+            if self.mean and self.std:
+                all_preds = self.denormalize(all_preds, self.mean, self.std)
+                all_gt = self.denormalize(all_gt, self.mean, self.std)
+
             tensorboard = self.logger.experiment
             fig, axs = plt.subplots(2, all_preds.shape[0] + 1)
             print(f'{all_preds.shape[0]}')
             print(range(self.hparams.save_val))
-            for i in range(self.hparams.save_val):
-                axs[0, i].imshow(all_preds[i, 0].float().numpy())
-                axs[1, i].imshow(all_gt[i, 0].float().numpy())
+            for i in range(min(self.hparams.save_val, all_preds.shape[0])):
+                axs[0, i].imshow(self.to_img(all_preds[i]))
+                axs[1, i].imshow(self.to_img(all_gt[i]))
+                axs[0, i].axis("off")
+                axs[1, i].axis("off")
             tensorboard.add_figure(f'Val Epoch: {self.current_epoch}', plt.gcf())
             self.val_epoch_outputs.clear()  # free memory
 
@@ -323,13 +356,20 @@ class LitMaskedAutoEncoder(L.LightningModule):
         if self.hparams.save_test > 0:
             all_preds = torch.cat([x[0] for x in self.test_epoch_outputs], dim=0)
             all_gt = torch.cat([x[1] for x in self.test_epoch_outputs], dim=0)
+
+            if self.mean and self.std:
+                all_preds = self.denormalize(all_preds, self.mean, self.std)
+                all_gt = self.denormalize(all_gt, self.mean, self.std)
+
             tensorboard = self.logger.experiment
             fig, axs = plt.subplots(2, all_preds.shape[0] + 1)
             print(f'{all_preds.shape[0]}')
             print(self.hparams.save_test)
-            for i in range(self.hparams.save_test):
-                axs[0, i].float().imshow(all_preds[i, 0].numpy())
-                axs[1, i].float().imshow(all_gt[i, 0].numpy())
+            for i in range(min(self.hparams.save_test, all_preds.shape[0])):
+                axs[0, i].imshow(self.to_img(all_preds[i]))
+                axs[1, i].imshow(self.to_img(all_gt[i]))
+                axs[0, i].axis("off")
+                axs[1, i].axis("off")
             tensorboard.add_figure(f'Test Epoch: {self.current_epoch}', plt.gcf())
             self.test_epoch_outputs.clear()  # free memory
 
@@ -347,12 +387,16 @@ class LitMaskedAutoEncoder(L.LightningModule):
             tb = self.logger.experiment
             tb.add_custom_scalars({
                 "Expert_Load": {
-                    "train_encoder": ["Multiline", [f'Expert_Load/train-enc-exp{x}' for x in range(self.encoder.num_exp)]],
+                    "train_encoder": ["Multiline",
+                                      [f'Expert_Load/train-enc-exp{x}' for x in range(self.encoder.num_exp)]],
                     "val_encoder": ["Multiline", [f'Expert_Load/val-enc-exp{x}' for x in range(self.encoder.num_exp)]],
-                    "test_encoder": ["Multiline", [f'Expert_Load/test-enc-exp{x}' for x in range(self.encoder.num_exp)]],
-                    "train_decoder": ["Multiline", [f'Expert_Load/train-dec-exp{x}' for x in range(self.decoder.num_exp)]],
+                    "test_encoder": ["Multiline",
+                                     [f'Expert_Load/test-enc-exp{x}' for x in range(self.encoder.num_exp)]],
+                    "train_decoder": ["Multiline",
+                                      [f'Expert_Load/train-dec-exp{x}' for x in range(self.decoder.num_exp)]],
                     "val_decoder": ["Multiline", [f'Expert_Load/val-dec-exp{x}' for x in range(self.decoder.num_exp)]],
-                    "test_decoder": ["Multiline", [f'Expert_Load/test-dec-exp{x}' for x in range(self.decoder.num_exp)]],
+                    "test_decoder": ["Multiline",
+                                     [f'Expert_Load/test-dec-exp{x}' for x in range(self.decoder.num_exp)]],
                 },
             })
 
@@ -361,7 +405,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
             self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.wd
         )
         if self.scheduler is None:
-            return {"optimizer": optimizer} 
+            return {"optimizer": optimizer}
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -371,11 +415,26 @@ class LitMaskedAutoEncoder(L.LightningModule):
             },
         }
 
+    @staticmethod
+    def denormalize(img_tensor, mean, std):
+        """Denormalizes a tensor of images."""
+        # Ensure mean and std are tensors
+        mean = torch.tensor(mean, device=img_tensor.device)
+        std = torch.tensor(std, device=img_tensor.device)
 
-if __name__=='__main__':
+        # Reshape for broadcasting (C) -> (1, C, 1, 1)
+        mean = mean.view(1, -1, 1, 1)
+        std = std.view(1, -1, 1, 1)
+
+        img_denorm = (img_tensor * std) + mean
+        return img_denorm
+
+
+if __name__ == '__main__':
     from model import *
+
     model = LitMaskedAutoEncoder(
-        ViT([64, 1, 28, 28], 7, 64, 4,2, 10, return_scores=False,
+        ViT([64, 1, 28, 28], 7, 64, 4, 2, 10, return_scores=False,
             disable_head=True, class_token=False),
         ViT([64, 1, 28, 28], 7, 64, 4, 2, 10, return_scores=False,
             disable_head=True, class_token=False)

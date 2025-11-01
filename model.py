@@ -10,16 +10,17 @@ class MLP(nn.Module):
     """
     Multi-Layer Perceptron (MLP).
     """
+
     def __init__(
-        self,
-        input_dim: int,
-        hidden_dims: list[int],
-        out_dim: int,
-        hidden_act: type[nn.Module] = nn.ReLU,
-        out_act: type[nn.Module] = None,
-        flatten: bool = False,
-        p_dropout: float = 0.0,
-        dtype: torch.dtype = torch.float32,
+            self,
+            input_dim: int,
+            hidden_dims: list[int],
+            out_dim: int,
+            hidden_act: type[nn.Module] = nn.ReLU,
+            out_act: type[nn.Module] = None,
+            flatten: bool = False,
+            p_dropout: float = 0.0,
+            dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
         self.input_dim = input_dim
@@ -35,7 +36,7 @@ class MLP(nn.Module):
         layers = []
         if self.flatten: layers.append(nn.Flatten(-3))
         for i in range(len(dims) - 2):
-            layers.append(nn.Linear(dims[i], dims[i+1], dtype=dtype))
+            layers.append(nn.Linear(dims[i], dims[i + 1], dtype=dtype))
             layers.append(hidden_act())
             if p_dropout > 0:
                 layers.append(nn.Dropout(p_dropout))
@@ -60,17 +61,18 @@ class MoE(nn.Module):
     """
 
     """
+
     def __init__(
-        self,
-        input_dim: int,
-        hidden_dims: list[int],
-        out_dim: int,
-        num_experts: int,
-        hidden_act: type[nn.Module] = nn.ReLU,
-        top_k: int = 2,
-        p_dropout: float = 0.,
-        return_weights: bool = False,
-        dtype: torch.dtype = torch.float32,
+            self,
+            input_dim: int,
+            hidden_dims: list[int],
+            out_dim: int,
+            num_experts: int,
+            hidden_act: type[nn.Module] = nn.ReLU,
+            top_k: int = 2,
+            p_dropout: float = 0.,
+            return_weights: bool = False,
+            dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
         self.num_experts = num_experts
@@ -93,9 +95,9 @@ class MoE(nn.Module):
 
         out_tokens = torch.zeros_like(x)
         for exp in range(self.num_experts):
-            mask = (gate_idx == exp).any(-1) # [B, S]
+            mask = (gate_idx == exp).any(-1)  # [B, S]
             if mask.any():
-                tokens = x[mask] # [N, D]
+                tokens = x[mask]  # [N, D]
                 tokens = self.experts[exp](tokens)
                 out_tokens[mask] += (gate_weights[mask][:, exp].unsqueeze(-1) * tokens)
 
@@ -104,7 +106,6 @@ class MoE(nn.Module):
             out_tokens.__setattr__('gate_idx', gate_idx)
 
         return out_tokens
-
 
     @staticmethod
     def load_balancing_loss(gate_weights: torch.Tensor, gate_idx: torch.Tensor, num_experts: int):
@@ -150,15 +151,15 @@ class MultiHeadSelfAttention(nn.Module):
         x = self.to_qkv(x).view(B, S, self.n_heads, 3 * self.qkv_dim).permute(0, 2, 1, 3)
         q, k, v = torch.chunk(x, 3, dim=-1)
         # dot product between q & k and apply scaling
-        x = (q @ k.permute(0, 1, 3, 2)) / (self.qkv_dim**0.5)
+        x = (q @ k.permute(0, 1, 3, 2)) / (self.qkv_dim ** 0.5)
         if mask is not None:
             x = x.masked_fill(mask == 0, float("-inf"))
         # attention scores
         scores = x.softmax(-1)
         x = (scores @ v).permute(0, 2, 1, 3).reshape(B, S, D)
         x = self.output(x)
-        
-        if self.return_scores: 
+
+        if self.return_scores:
             x.__setattr__('scores', scores)
         return x
 
@@ -174,17 +175,17 @@ class TransformerBlock(nn.Module):
     """Transformer block with MHSA + MLP."""
 
     def __init__(
-        self,
-        d_emb: int,
-        n_heads: int,
-        mlp_factor: int = 4,
-        act_fn: type[nn.Module] = nn.ReLU,
-        att_dropout: float = 0.0,
-        mlp_dropout: float = 0.0,
-        pre_ln: bool = True,
-        return_attscores: bool = False,
-        lb_weights: bool = False,
-        num_exp: int = 1,
+            self,
+            d_emb: int,
+            n_heads: int,
+            mlp_factor: int = 4,
+            act_fn: type[nn.Module] = nn.ReLU,
+            att_dropout: float = 0.0,
+            mlp_dropout: float = 0.0,
+            pre_ln: bool = True,
+            return_attscores: bool = False,
+            lb_weights: bool = False,
+            num_exp: int = 1,
     ) -> None:
         super().__init__()
         assert (not lb_weights) or (num_exp > 1), 'use num_exp > 1 to return weights'
@@ -222,7 +223,7 @@ class TransformerBlock(nn.Module):
         x = res + self.dropout(x)
         if not self.pre_ln:
             x = self.ln2(x)
-        
+
         for k, v in outputs.items():
             x.__setattr__(k, v)
         return x
@@ -232,25 +233,25 @@ class ViT(nn.Module):
     """Vision Transformer (ViT)."""
 
     def __init__(
-        self,
-        x_dim: tuple[int, int, int, int],
-        patch_dim: int,
-        d_emb: int,
-        n_heads: int,
-        n_blocks: int,
-        n_class: int,
-        class_token: bool = True,
-        mlp_factor: int = 4,
-        act_fn: type[nn.Module] = nn.GELU,
-        att_dropout: float = 0.0,
-        mlp_dropout: float = 0.0,
-        pre_ln: bool = True,
-        learned_encodings: bool = True,
-        disable_head: bool = False,
-        return_attscores: bool = False,
-        return_moescores: bool = False,
-        num_exp: int = 1,
-        lb_loss: bool = False,
+            self,
+            x_dim: tuple[int, int, int, int],
+            patch_dim: int,
+            d_emb: int,
+            n_heads: int,
+            n_blocks: int,
+            n_class: int,
+            class_token: bool = True,
+            mlp_factor: int = 4,
+            act_fn: type[nn.Module] = nn.GELU,
+            att_dropout: float = 0.0,
+            mlp_dropout: float = 0.0,
+            pre_ln: bool = True,
+            learned_encodings: bool = True,
+            disable_head: bool = False,
+            return_attscores: bool = False,
+            return_moescores: bool = False,
+            num_exp: int = 1,
+            lb_loss: bool = False,
     ) -> None:
         super().__init__()
         assert (not lb_loss) or num_exp > 1, 'use num_exp > 1 to enable lb_loss'
@@ -266,17 +267,19 @@ class ViT(nn.Module):
         _, self.x_c, self.x_h, self.x_w = x_dim
         self.p_dim = patch_dim
         self.class_token = class_token
-        self.n_patch = self.x_h * self.x_w // (self.p_dim**2)
+        self.n_patch = self.x_h * self.x_w // (self.p_dim ** 2)
         assert (self.x_h % self.p_dim == 0) and (self.x_w % self.p_dim == 0), (
             "Input height/width should be divisible by patch_dim"
         )
 
-        self.embedding = nn.Linear((self.p_dim**2) * self.x_c, d_emb)
+        self.embedding = nn.Linear((self.p_dim ** 2) * self.x_c, d_emb)
         if class_token:
             self.cls = nn.Parameter(torch.zeros(1, 1, d_emb))
+            nn.init.trunc_normal_(self.cls, std=0.02)
             self.n_patch += 1
         if learned_encodings:
             self.pos_emb = nn.Parameter(torch.zeros(1, self.n_patch, d_emb))
+            nn.init.trunc_normal_(self.pos_emb, std=0.02)
         else:
             self.pos_emb = nn.Parameter(get_2d_sincos_pos_embed(d_emb, self.x_h // self.p_dim, self.class_token),
                                         requires_grad=False)
@@ -347,7 +350,6 @@ class ViT(nn.Module):
         gh = H // p
         gw = W // p
 
-
         patches = imgs.reshape(B, C, gh, p, gw, p)
         patches = patches.permute(0, 2, 4, 3, 5, 1)
         patches = patches.reshape(B, gh * gw, p * p * C)
@@ -374,9 +376,6 @@ class ViT(nn.Module):
         imgs = patches.reshape(B, C, gh * p, gw * p)
         return imgs.contiguous()
 
-
-
-
     @staticmethod
     def _init_weights(m: nn.Module) -> None:
         if isinstance(m, nn.Linear):
@@ -391,7 +390,8 @@ class DiT(nn.Module):
     def __init__(self):
         super(DiT, self).__init__()
 
-if __name__=='__main__':
+
+if __name__ == '__main__':
     inp = torch.randn(64, 1, 28, 28)
     model = ViT([64, 1, 28, 28],
                 7,
@@ -404,6 +404,6 @@ if __name__=='__main__':
                 class_token=True,
                 learned_encodings=False,
                 num_exp=5,
-                lb_loss = True)
+                lb_loss=True)
     model(inp)
     print()
