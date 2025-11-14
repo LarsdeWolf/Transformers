@@ -143,9 +143,9 @@ def main(model, config, dataset_name: str = "flowers102", log_graph=False):
 
 if __name__ == "__main__":
     # TRAIN PARAMS
-    N_BATCH = 100
-    N_EPOCH = 500
-    N_WORKERS = 5
+    N_BATCH = 54
+    N_EPOCH = 100
+    N_WORKERS = 3
 
     # DATA PARAMS
     DNAME = 'cifar10'
@@ -177,8 +177,8 @@ if __name__ == "__main__":
         'Encoder': (ViT, {
             'd_emb': 384,
             'patch_dim': 4,
-            'n_heads': 6,
-            'n_blocks': 8,
+            'n_heads': 2,
+            'n_blocks': 2,
             'class_token': False,
             'disable_head': True,
             'num_exp': 1,
@@ -190,8 +190,8 @@ if __name__ == "__main__":
         'Decoder': (ViT, {
             'd_emb': 192,
             'patch_dim': 4,
-            'n_heads': 4,
-            'n_blocks': 4,
+            'n_heads': 2,
+            'n_blocks': 2,
             'class_token': False,
             'disable_head': True,
             'num_exp': 1,

@@ -76,11 +76,11 @@ class LitClassification(L.LightningModule):
 
     def on_before_optimizer_step(self, optimizer):
         """Compute and log global gradient norm across all parameters."""
-        # Stack all gradients into one vector and compute its L2 norm
+        # L2 norm
         grads = [p.grad.detach().flatten() for p in self.model.parameters() if p.grad is not None]
         if grads:  # avoid empty list
             all_grads = torch.cat(grads)
-            total_norm = all_grads.norm(2)  # L2 norm
+            total_norm = all_grads.norm(2)  
             self.log("grad_norm/global", total_norm, on_step=True, on_epoch=True, prog_bar=False)
 
     def on_fit_start(self) -> None:
@@ -161,9 +161,9 @@ class LitMaskedAutoEncoder(L.LightningModule):
     def to_img(x):
         x = x.detach().cpu().clamp(0, 1)
         if x.shape[0] == 1:
-            return x[0].numpy()  # grayscale
+            return x[0].numpy() 
         else:
-            return x.permute(1, 2, 0).numpy()  # RGB
+            return x.permute(1, 2, 0).numpy() 
 
     def forward(self, x: Tensor) -> tuple[Any, Tensor, Tensor, int]:
         # ENCODER
@@ -329,7 +329,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
                 axs[1, i].axis("off")
 
             tensorboard.add_figure(f'Train Epoch: {self.current_epoch}', plt.gcf())
-            self.train_epoch_outputs.clear()  # free memory
+            self.train_epoch_outputs.clear() 
 
     def on_validation_epoch_end(self):
         if self.hparams.save_val > 0 and self.current_epoch % 5 == 0:
@@ -350,7 +350,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
                 axs[0, i].axis("off")
                 axs[1, i].axis("off")
             tensorboard.add_figure(f'Val Epoch: {self.current_epoch}', plt.gcf())
-            self.val_epoch_outputs.clear()  # free memory
+            self.val_epoch_outputs.clear()  
 
     def on_test_end(self):
         if self.hparams.save_test > 0:
@@ -371,15 +371,13 @@ class LitMaskedAutoEncoder(L.LightningModule):
                 axs[0, i].axis("off")
                 axs[1, i].axis("off")
             tensorboard.add_figure(f'Test Epoch: {self.current_epoch}', plt.gcf())
-            self.test_epoch_outputs.clear()  # free memory
+            self.test_epoch_outputs.clear()  
 
     def on_before_optimizer_step(self, optimizer):
-        """Compute and log global gradient norm across all parameters."""
-        # Stack all gradients into one vector and compute its L2 norm
         grads = [p.grad.detach().flatten() for p in self.parameters() if p.grad is not None]
-        if grads:  # avoid empty list
+        if grads:  
             all_grads = torch.cat(grads)
-            total_norm = all_grads.norm(2)  # L2 norm
+            total_norm = all_grads.norm(2)  
             self.log("grad_norm/global", total_norm, on_step=True, on_epoch=True, prog_bar=False)
 
     def on_fit_start(self) -> None:
@@ -418,11 +416,9 @@ class LitMaskedAutoEncoder(L.LightningModule):
     @staticmethod
     def denormalize(img_tensor, mean, std):
         """Denormalizes a tensor of images."""
-        # Ensure mean and std are tensors
         mean = torch.tensor(mean, device=img_tensor.device)
         std = torch.tensor(std, device=img_tensor.device)
 
-        # Reshape for broadcasting (C) -> (1, C, 1, 1)
         mean = mean.view(1, -1, 1, 1)
         std = std.view(1, -1, 1, 1)
 
