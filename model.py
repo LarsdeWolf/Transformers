@@ -7,7 +7,8 @@ from utils import get_2d_sincos_pos_embed
 
 
 class MLP(nn.Module):
-    """
+    """MLP Module
+
     Builds a sequence of Linear -> Activation -> Dropout layers
     (for all but the final layer). The final layer optionally applies a
     separate output activation.
@@ -84,7 +85,8 @@ class MLP(nn.Module):
 
 
 class MoE(nn.Module):
-    """
+    """Mixture-of-Experts Module
+
     Contains `num_experts` independent MLPs. A linear gating network
     computes scores of shape (tokens, num_experts); these scores are
     then masked (except top-k) and rescaled into a probability distribution,
@@ -160,28 +162,6 @@ class MoE(nn.Module):
 
     @staticmethod
     def load_balancing_loss(gate_weights: torch.Tensor, gate_idx: torch.Tensor, num_experts: int):
-        """
-        Computes an "importance" term (sum of gate probabilities per expert) and a
-        "load" term (number of tokens routed to each expert) and returns
-        a scalar loss based on their elementwise product.
-
-        Parameters
-        ----------
-        gate_weights:
-            Tensor of shape [B, S, num_experts] containing per-token
-            gating probabilities (after softmax and masking).
-        gate_idx:
-            Integer tensor with selected expert indices for the top-k
-            gating choices (used to compute load).
-        num_experts:
-            Number of experts (size of the expert axis).
-
-        Returns
-        -------
-        Tensor
-            Scalar loss tensor (single-element) encouraging balanced
-            expert utilization.
-        """
         # Importance: sum of probabilities per expert
         importance = gate_weights.sum(dim=[0, 1])  # [num_experts]
         importance = importance / importance.sum()
@@ -198,13 +178,11 @@ class MoE(nn.Module):
 
 
 class MultiHeadSelfAttention(nn.Module):
-    """Multi-head self-attention (MHSA).
+    """Multi-head self-attention (MHSA)
 
-    A straightforward implementation of transformer-style scaled
-    dot-product attention. The module computes concatenated qkv via a
-    single Linear projection, splits heads, applies attention with an
-    optional mask, and projects back to the original embedding
-    dimension.
+    This module computes concatenated qkv via a single Linear projection,
+    splits heads, applies attention with an optional mask,
+    and projects back to the original embedding dimension.
 
     Parameters
     ----------
@@ -216,6 +194,11 @@ class MultiHeadSelfAttention(nn.Module):
     return_scores:
         If True, attn score tensors will be attached to the returned
         tensor as the attribute `.scores`.
+
+    Returns
+    -------
+    Tensor
+        Output of shape (B, S, D) for input of shape (B, S, D)
     """
 
     def __init__(
@@ -237,25 +220,6 @@ class MultiHeadSelfAttention(nn.Module):
         self.apply(self._init_weights)
 
     def forward(self, x: Tensor, mask: Optional[Tensor] = None) -> tuple[Tensor, Optional[Tensor]]:
-        """Compute self-attention for input tokens.
-
-        Parameters
-        ----------
-        x:
-            Tensor of shape [B, S, D] containing token embeddings.
-        mask:
-            Optional boolean or byte mask broadcastable to attention
-            weights; positions with mask==0 will be ignored (set to
-            -inf before softmax).
-
-        Returns
-        -------
-        Tensor
-            Output tensor of shape [B, S, D] after attention and output
-            projection. If `return_scores` is True, the attention
-            weights tensor of shape [B, n_heads, S, S] is attached to
-            the returned tensor as `.scores`.
-        """
         B, S, D = x.shape
         # project to qkv embedding and split into separate q, k, v
         x = self.to_qkv(x).view(B, S, self.n_heads, 3 * self.qkv_dim).permute(0, 2, 1, 3)
@@ -281,14 +245,48 @@ class MultiHeadSelfAttention(nn.Module):
                 nn.init.zeros_(m.bias)
 
 
-class TransformerBlock(nn.Module):
-    """Transformer block combining MHSA, residuals and MLP.
 
-    This block implements a standard transformer block with optional
-    pre-layernorm (`pre_ln`). It supports replacing the dense MLP with
+class TransformerBlock(nn.Module):
+    """Transformer block combining MHSA, residuals and MLP
+
+    
+    Implements a standard transformer block with optional
+    pre-layernorm (`pre_ln`). Supports replacing the dense MLP with
     a Mixture-of-Experts by setting `num_exp > 1`. When `lb_weights` is
     True the block will expose expert gating weights on the block's
     output for later aggregation or loss computation.
+
+    Parameters
+    ----------
+    d_emb:
+        Total embedding dimension.
+    n_heads:
+        Number of attention heads.
+    mlp_factor:
+        Factor to determine the hidden dimension size of the MLP.
+    act_fn:
+        Activation function to use in the MLP.
+    att_dropout:
+        Dropout rate for the attention mechanism.
+    mlp_dropout:
+        Dropout rate for the MLP.
+    pre_ln:
+        If True, applies LayerNorm before the attention and MLP blocks.
+    return_attscores:
+        If True, attention scores are attached to the output.
+    lb_weights:
+        If True, enables load balancing loss calculation for MoE.
+    num_exp:
+        Number of experts to use in the MoE layer. If 1, a standard MLP is used.
+
+    Returns
+    -------
+    Tensor
+        The output tensor of shape (B, S, D). Depending on the configuration,
+        this tensor may have attached attributes:
+        - `.scores`: Attention scores from the MHSA module.
+        - `.gate_weights`: Gating weights from the MoE layer.
+        - `.gate_idx`: Expert indices chosen by the MoE gating network.
     """
 
     def __init__(
@@ -347,7 +345,7 @@ class TransformerBlock(nn.Module):
 
 
 class ViT(nn.Module):
-    """Minimal Vision Transformer (ViT) implementation.
+    """Vision Transformer (ViT) Module
 
     The ViT accepts images of shape [B, C, H, W], splits them into
     non-overlapping square patches of size `patch_dim`, projects each
@@ -360,12 +358,26 @@ class ViT(nn.Module):
     ----------
     x_dim:
         Tuple describing input batch shape template (unused batch dim
-        first), e.g. `[B, C, H, W]` where B may be arbitrary. Only C,
-        H, W are used to infer patch counts.
+        first), e.g., `[B, C, H, W]` where B may be arbitrary. Only C,
+        H, and W are used to infer patch counts.
     patch_dim:
         Width/height of each square patch.
-    d_emb, n_heads, n_blocks, n_class:
-        Standard transformer sizes.
+    d_emb:
+        Total embedding dimension.
+    n_heads:
+        Number of attention heads.
+    n_blocks:
+        Number of transformer blocks.
+    n_class:
+        Number of output classes for the classification head.
+    mlp_factor:
+        Factor to determine the hidden dimension size of the MLP in transformer blocks.
+    act_fn:
+        Activation function to use in the MLP.
+    att_dropout:
+        Dropout rate for the attention mechanism.
+    mlp_dropout:
+        Dropout rate for the MLP.
     class_token:
         If True, a learnable CLS token is prepended and used for
         classification.
@@ -373,8 +385,16 @@ class ViT(nn.Module):
         If True, learnable positional embeddings are used; otherwise a
         fixed 2D sin/cos embedding is used (not learned).
     disable_head:
-        If True, the final MLP head is disabled and the pooled token is
+        If True, the final MLP head is disabled, and the pooled token is
         returned directly (useful for feature extraction).
+    return_attscores:
+        If True, attention scores are attached to the output.
+    return_moescores:
+        If True, expert indices from MoE layers are attached to the output.
+    num_exp:
+        Number of experts to use in MoE layers. If 1, a standard MLP is used.
+    lb_loss:
+        If True, enables load balancing loss calculation for MoE layers.
 
     Returns
     -------
@@ -537,18 +557,6 @@ class ViT(nn.Module):
                 nn.init.zeros_(m.bias)
         elif isinstance(m, nn.Parameter):
             nn.init.trunc_normal_(m, std=0.02)
-
-
-class DiT(nn.Module):
-    """Placeholder for a diffusion transformer (DiT) variant.
-
-    The class is currently empty and provided as a minimal placeholder
-    for future extension. It intentionally does not implement forward
-    logic yet.
-    """
-
-    def __init__(self):
-        super(DiT, self).__init__()
 
 
 if __name__ == '__main__':

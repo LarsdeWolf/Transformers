@@ -163,53 +163,80 @@ class LitMaskedAutoEncoder(L.LightningModule):
         if x.shape[0] == 1:
             return x[0].numpy() 
         else:
-            return x.permute(1, 2, 0).numpy() 
+            return x.permute(1, 2, 0).numpy()
 
-    def forward(self, x: Tensor) -> tuple[Any, Tensor, Tensor, int]:
-        # ENCODER
-        x = self.encoder.patchify(x)
-        x = self.encoder.embedding(x) + self.encoder.pos_emb
+    def forward(self, x: Tensor):
+        """
+        Forward pass of a masked autoencoder.
+        Returns:
+            preds        -- [B, N, patch_dim]
+            idx_shuffle  -- permutation indices used for masking
+            idx_restore  -- inverse permutation
+            n_mask       -- number of masked patches
+        """
+
+        patches = self.encoder.patchify(x)   
+        x = self.encoder.embedding(patches)  
+        x = x + self.encoder.pos_emb  
 
         B, N, D = x.shape
         n_mask = int(N * self.mask_ratio)
         idx_shuffle = torch.rand(B, N, device=x.device).argsort(dim=1)
         idx_restore = idx_shuffle.argsort(dim=1)
 
-        x = torch.gather(x, dim=1, index=idx_shuffle.unsqueeze(-1).expand(-1, -1, D))[:, n_mask:, :]
-        enc_lb_losses = []
-        enc_moe_scores = []
-        for bl in self.encoder.blocks:
-            x = bl(x)
-            if self.enc_lb:
-                enc_lb_losses.append(bl.mlp.load_balancing_loss(x.gate_weights, x.gate_idx, bl.mlp.num_experts))
-                enc_moe_scores.append(x.gate_idx)
+        # keep only visible patches
+        x = torch.gather(
+            x, dim=1, index=idx_shuffle[:, n_mask:].unsqueeze(-1).expand(-1, -1, D)
+        )  
+        if self.enc_lb:
+            enc_lb_losses, enc_gate_scores = [], []
 
-        # DECODER
-        x = self.enc_todec(x)
-        mask_tokens = self.mask_token.repeat(x.shape[0], n_mask, 1)
-        mask_tokens = torch.cat([mask_tokens, x], dim=1)
-        x = torch.gather(mask_tokens, dim=1, index=idx_restore.unsqueeze(-1).expand(-1, -1, self.decoder.d_emb))
+        for block in self.encoder.blocks:
+            x = block(x)
+            if self.enc_lb:
+                enc_lb_losses.append(block.mlp.load_balancing_loss(
+                    x.gate_weights, x.gate_idx, block.mlp.num_experts
+                ))
+                enc_gate_scores.append(x_vis.gate_idx)
+
+
+        x = self.enc_todec(x)  
+        mask_tokens = self.mask_token.repeat(B, n_mask, 1)  
+        x = torch.cat([mask_tokens, x], dim=1) 
+        x = torch.gather(
+            x,
+            dim=1,
+            index=idx_restore.unsqueeze(-1).expand(-1, -1, self.decoder.d_emb)
+        )
         x = x + self.decoder.pos_emb
-        dec_lb_losses = []
-        dec_moe_scores = []
-        for bl in self.decoder.blocks:
-            x = bl(x)
-            if self.enc_lb:
-                dec_lb_losses.append(bl.mlp.load_balancing_loss(x.gate_weights, x.gate_idx, bl.mlp.num_experts))
-                dec_moe_scores.append(x.gate_idx)
-        x = self.to_pix(x)
+        if self.dec_lb:
+            dec_lb_losses, dec_gate_scores = [], []
 
-        if self.enc_lb: x.__setattr__('enc_lb_loss', (sum(enc_lb_losses) / len(enc_lb_losses)))
-        if self.dec_lb: x.__setattr__('dec_lb_loss', (sum(dec_lb_losses) / len(dec_lb_losses)))
-        if self.encoder.return_moescores: x.__setattr__('enc_moe_scores', torch.stack(enc_moe_scores, dim=1))
-        if self.decoder.return_moescores: x.__setattr__('dec_moe_scores', torch.stack(dec_moe_scores, dim=1))
+        for block in self.decoder.blocks:
+            x = block(x)
+            if self.dec_lb:
+                dec_lb_losses.append(block.mlp.load_balancing_loss(
+                    x.gate_weights, x.gate_idx, block.mlp.num_experts
+                ))
+                dec_gate_scores.append(x.gate_idx)
+
+        x = self.to_pix(x)  
+
+        if self.enc_lb:
+            x.enc_lb_loss = sum(enc_lb_losses) / len(enc_lb_losses)
+        if self.dec_lb:
+            x.dec_lb_loss = sum(dec_lb_losses) / len(dec_lb_losses)
+        if self.encoder.return_moescores:
+            x.enc_moe_scores = torch.stack(enc_gate_scores, dim=1)
+        if self.decoder.return_moescores:
+            x.dec_moe_scores = torch.stack(dec_gate_scores, dim=1)
 
         return x, idx_shuffle, idx_restore, n_mask
 
     def training_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> Tensor:
         x, _ = batch
         preds, idx_shuffle, idx_restore, n_mask = self.forward(x)
-        # Select masked patches
+               # Select masked patches
         masked = torch.gather(preds,
                               dim=1,
                               index=idx_shuffle.unsqueeze(-1).expand(-1, -1, preds.shape[-1]))[:, :n_mask, :]
