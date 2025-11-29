@@ -3,12 +3,14 @@ import torch.nn as nn
 import lightning as L
 from torchvision import datasets
 from torchvision.transforms import v2
-
 from torch.utils.data import DataLoader
-
 from pytorch_lightning.loggers import TensorBoardLogger
-from model import ViT, MLP, MoE
-from lit_model import *
+from lightning.pytorch.cli import LightningCLI
+from lit_model import LitClassification, LitClassCondDiffusion, LitMaskedAutoEncoder
+from model import *
+from data import DataModule
+from utils import *
+
 
 # Dataset registry with transforms and metadata
 DATASETS = {
@@ -23,9 +25,9 @@ DATASETS = {
     "mnist": {
         "cls": datasets.MNIST,
         "num_classes": 10,
-        "resize": (28, 28),
-        "mean": [0.1307],
-        "std": [0.3081],
+        "resize": (32, 32),
+        "mean": [.5],
+        "std": [.5],
         "splits": ["train", "test"],
     },
     "cifar10": {
@@ -47,8 +49,9 @@ def get_datasets(name: str, root: str = "./data"):
     transform = v2.Compose([
         v2.ToTensor(),
         v2.Resize(cfg["resize"]),
-        *AUGMENTS,
-        v2.Normalize(cfg["mean"], cfg["std"]),
+        *AUGMENTS, # Ensure AUGMENTS is empty for MNIST
+        v2.Normalize(cfg["mean"], cfg["std"])
+        # v2.Normalize([0.5] * len(cfg["mean"]), [0.5] * len(cfg["std"]))
     ])
 
     def make_split(split_name: str):
@@ -77,21 +80,23 @@ def get_datasets(name: str, root: str = "./data"):
 
     return datasets_out, cfg
 
+def main_():
+    cli = LightningCLI()
 
-def main(model, config, dataset_name: str = "flowers102", log_graph=False):
+def main(model, config, dataset_name: str, n_batch: int, n_workers: int, n_train: int, log_graph=False):
     datasets_out, cfg = get_datasets(dataset_name)
-    if N_TRAIN != 0:
+    if n_train != 0:
         datasets_out['train'] = torch.utils.data.Subset(datasets_out['train'],
-                                                        torch.randperm(len(datasets_out["train"]))[:N_TRAIN])
-    train_loader = DataLoader(datasets_out["train"], batch_size=N_BATCH, shuffle=True, num_workers=N_WORKERS,
+                                                        torch.randperm(len(datasets_out["train"]))[:n_train])
+    train_loader = DataLoader(datasets_out["train"], batch_size=n_batch, shuffle=True, num_workers=n_workers,
                               persistent_workers=True, pin_memory=False)
     val_loader = (
-        DataLoader(datasets_out["val"], batch_size=N_BATCH, shuffle=False, num_workers=N_WORKERS,
+        DataLoader(datasets_out["val"], batch_size=n_batch, shuffle=False, num_workers=n_workers,
                    persistent_workers=True, pin_memory=False)
         if datasets_out["val"] is not None
         else None
     )
-    test_loader = DataLoader(datasets_out["test"], batch_size=N_BATCH, shuffle=False, num_workers=N_WORKERS,
+    test_loader = DataLoader(datasets_out["test"], batch_size=n_batch, shuffle=False, num_workers=n_workers,
                              persistent_workers=True, pin_memory=False)
 
     sample, _ = datasets_out["train"][0]
@@ -105,7 +110,7 @@ def main(model, config, dataset_name: str = "flowers102", log_graph=False):
             epochs=N_EPOCH,
             scheduler=SCHEDULER
         )
-    else:
+    elif model == LitMaskedAutoEncoder:
         model = model(
             encoder=config['Encoder'][0](x_dim=[1, c, h, w], n_class=cfg['num_classes'], **config['Encoder'][1]),
             decoder=config['Decoder'][0](x_dim=[1, c, h, w], n_class=cfg['num_classes'], **config['Decoder'][1]),
@@ -115,6 +120,13 @@ def main(model, config, dataset_name: str = "flowers102", log_graph=False):
             scheduler=SCHEDULER,
             **config['MISC']
         )
+    else:
+        model = model(
+            input_shape = [1, c, h, w],
+            scheduler=SCHEDULER,
+            **config
+            )
+
 
     logger = TensorBoardLogger("lightning_logs", name=dataset_name + '/' + model.__class__.__name__,
                                log_graph=log_graph)
@@ -143,19 +155,19 @@ def main(model, config, dataset_name: str = "flowers102", log_graph=False):
 
 if __name__ == "__main__":
     # TRAIN PARAMS
-    N_BATCH = 54
-    N_EPOCH = 100
+    N_BATCH = 32
+    N_EPOCH = 120
     N_WORKERS = 3
 
     # DATA PARAMS
-    DNAME = 'cifar10'
-    N_TRAIN = 500
+    DNAME = 'mnist'
+    N_TRAIN = 200
     AUGMENTS = []
 
     # LEARN PARAMS
     LR = 3e-4
-    WD = .05
-    SCHEDULER = None
+    WD = .0
+    SCHEDULER = torch.optim.lr_scheduler.CosineAnnealingLR
 
     # model, config = LitClassification, {
     #     'Encoder': (ViT, {
@@ -173,34 +185,59 @@ if __name__ == "__main__":
     #         })
     # }
 
-    model, config = LitMaskedAutoEncoder, {
-        'Encoder': (ViT, {
-            'd_emb': 384,
-            'patch_dim': 4,
-            'n_heads': 2,
-            'n_blocks': 2,
-            'class_token': False,
-            'disable_head': True,
-            'num_exp': 1,
-            'lb_loss': False,
-            'return_moescores': False,
-            'att_dropout': .05,
-            'mlp_dropout': .05,
-        }),
-        'Decoder': (ViT, {
-            'd_emb': 192,
-            'patch_dim': 4,
-            'n_heads': 2,
-            'n_blocks': 2,
-            'class_token': False,
-            'disable_head': True,
-            'num_exp': 1,
-            'lb_loss': False,
-            'return_moescores': False,
-            'att_dropout': .05,
-            'mlp_dropout': .05,
-        }),
-        'MISC': {'save_train': 10, 'mean': DATASETS[DNAME]['mean'], 'std': DATASETS[DNAME]['std']}
+    model, config = LitClassCondDiffusion, {
+        'p_dim': 8,
+        'vae': None,
+        'model': DiT(
+            hidden_dim=80,
+            n_heads=2,
+            n_blocks=2,
+            mlp_factor=2,
+            act_fn=nn.GELU,
+            att_dropout=0.0,
+            mlp_dropout=0.0,
+        ), # Ensure hidden_dim is divisible by n_heads
+        'n_class': 10,
+        'noise_scheduler': NoiseScheduler(NoiseSchedulerConfig()),
+        'save_train': 10, 
     }
 
-    main(model, config, DNAME)
+    # model, config = LitMaskedAutoEncoder, {
+    #     'Encoder': (ViT, {
+    #         'd_emb': 384,
+    #         'patch_dim': 4,
+    #         'n_heads': 2,
+    #         'n_blocks': 2,
+    #         'class_token': False,
+    #         'disable_head': True,
+    #         'num_exp': 1,
+    #         'lb_loss': False,
+    #         'return_moescores': False,
+    #         'att_dropout': .05,
+    #         'mlp_dropout': .05,
+    #     }),
+    #     'Decoder': (ViT, {
+    #         'd_emb': 192,
+    #         'patch_dim': 4,
+    #         'n_heads': 2,
+    #         'n_blocks': 2,
+    #         'class_token': False,
+    #         'disable_head': True,
+    #         'num_exp': 1,
+    #         'lb_loss': False,
+    #         'return_moescores': False,
+    #         'att_dropout': .05,
+    #         'mlp_dropout': .05,
+    #     }),
+    #     'MISC': {'save_train': 10, 'mean': DATASETS[DNAME]['mean'], 'std': DATASETS[DNAME]['std']}
+    # }
+    # main_()
+
+    main(
+        model=model,
+        config=config,
+        dataset_name=DNAME,
+        n_batch=N_BATCH,
+        n_workers=N_WORKERS,
+        n_train=N_TRAIN
+    )

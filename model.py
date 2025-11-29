@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from typing import Optional, Union, Any
-from utils import get_2d_sincos_pos_embed
+from typing import Optional, Union, Any, Tuple
+from utils import get_2d_sincos_pos_embed, patchify, depatchify
 
 
 class MLP(nn.Module):
@@ -146,19 +146,20 @@ class MoE(nn.Module):
         mask = torch.zeros_like(gate_weights, dtype=torch.bool).scatter(-1, gate_idx, True)
         gate_weights = self.softmax(gate_weights.masked_fill(~mask, float('-inf')))
 
-        out_tokens = torch.zeros_like(x)
+        out = torch.zeros(x.shape[:-1] + (self.experts[0].out_dim,), device=x.device, dtype=x.dtype)
         for exp in range(self.num_experts):
-            mask = (gate_idx == exp).any(-1)  # [B, S]
+            mask = (gate_idx == exp).any(dim=-1)
             if mask.any():
-                tokens = x[mask]  # [N, D]
-                tokens = self.experts[exp](tokens)
-                out_tokens[mask] += (gate_weights[mask][:, exp].unsqueeze(-1) * tokens)
+                tokens_for_expert = x[mask]
+                expert_output = self.experts[exp](tokens_for_expert)
+                weights_for_expert = gate_weights[mask][:, exp].unsqueeze(-1)
+                out[mask] += weights_for_expert * expert_output
 
         if self.return_weights:
-            out_tokens.__setattr__('gate_weights', gate_weights)
-            out_tokens.__setattr__('gate_idx', gate_idx)
+            out.__setattr__('gate_weights', gate_weights)
+            out.__setattr__('gate_idx', gate_idx)
 
-        return out_tokens
+        return out
 
     @staticmethod
     def load_balancing_loss(gate_weights: torch.Tensor, gate_idx: torch.Tensor, num_experts: int):
@@ -203,19 +204,19 @@ class MultiHeadSelfAttention(nn.Module):
 
     def __init__(
             self,
-            d_emb: int,
+            hidden_dim: int,
             n_heads: int,
             return_scores: bool = False
     ) -> None:
         super().__init__()
-        assert d_emb % n_heads == 0, "d_emb must be divisible by n_heads"
-        self.qkv_dim = d_emb // n_heads
-        self.d_emb = d_emb
+        assert hidden_dim % n_heads == 0, "hidden_dim must be divisible by n_heads"
+        self.qkv_dim = hidden_dim // n_heads
+        self.hidden_dim = hidden_dim
         self.n_heads = n_heads
         self.return_scores = return_scores
 
-        self.to_qkv = nn.Linear(self.d_emb, 3 * self.d_emb)
-        self.output = nn.Linear(self.d_emb, self.d_emb)
+        self.to_qkv = nn.Linear(self.hidden_dim, 3 * self.hidden_dim)
+        self.output = nn.Linear(self.hidden_dim, self.hidden_dim)
 
         self.apply(self._init_weights)
 
@@ -258,7 +259,7 @@ class TransformerBlock(nn.Module):
 
     Parameters
     ----------
-    d_emb:
+    hidden_dim:
         Total embedding dimension.
     n_heads:
         Number of attention heads.
@@ -278,7 +279,7 @@ class TransformerBlock(nn.Module):
         If True, enables load balancing loss calculation for MoE.
     num_exp:
         Number of experts to use in the MoE layer. If 1, a standard MLP is used.
-
+ 
     Returns
     -------
     Tensor
@@ -291,7 +292,7 @@ class TransformerBlock(nn.Module):
 
     def __init__(
             self,
-            d_emb: int,
+            hidden_dim: int,
             n_heads: int,
             mlp_factor: int = 4,
             act_fn: type[nn.Module] = nn.ReLU,
@@ -304,17 +305,18 @@ class TransformerBlock(nn.Module):
     ) -> None:
         super().__init__()
         assert (not lb_weights) or (num_exp > 1), 'use num_exp > 1 to return weights'
+        self.hidden_dim = hidden_dim
         self.pre_ln = pre_ln
         self.return_attscores = return_attscores
         self.lb_weights = lb_weights
 
-        self.mhsa = MultiHeadSelfAttention(d_emb, n_heads, self.return_attscores)
+        self.mhsa = MultiHeadSelfAttention(hidden_dim, n_heads, self.return_attscores)
         if num_exp > 1:
-            self.mlp = MoE(d_emb, [(mlp_factor * d_emb) // num_exp], d_emb, num_exp, return_weights=self.lb_weights)
+            self.mlp = MoE(hidden_dim, [(mlp_factor * hidden_dim) // num_exp], hidden_dim, num_exp, return_weights=self.lb_weights)
         else:
-            self.mlp = MLP(d_emb, [mlp_factor * d_emb], d_emb, act_fn, p_dropout=mlp_dropout)
-        self.ln1 = nn.LayerNorm(d_emb)
-        self.ln2 = nn.LayerNorm(d_emb)
+            self.mlp = MLP(hidden_dim, [mlp_factor * hidden_dim], hidden_dim, act_fn, p_dropout=mlp_dropout)
+        self.ln1 = nn.LayerNorm(hidden_dim)
+        self.ln2 = nn.LayerNorm(hidden_dim)
         self.dropout = nn.Dropout(att_dropout)
 
     def forward(self, x: Tensor) -> tuple[Union[Tensor, Any], Any, list[Any]]:
@@ -342,6 +344,47 @@ class TransformerBlock(nn.Module):
         for k, v in outputs.items():
             x.__setattr__(k, v)
         return x
+    
+
+class DiTBlock(TransformerBlock):
+    """
+    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
+    """
+
+    def __init__(self, hidden_dim, n_heads, mlp_factor=4, **block_kwargs):
+        super().__init__(hidden_dim, n_heads, mlp_factor, **block_kwargs)
+        self.adamlp = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 6 * hidden_dim, bias=True)
+        )
+        self.ln1 = nn.LayerNorm(hidden_dim, elementwise_affine=False, bias=False)
+        self.ln2 = nn.LayerNorm(hidden_dim, elementwise_affine=False, bias=False)
+
+        nn.init.constant_(self.adamlp[-1].weight, 0)
+        nn.init.constant_(self.adamlp[-1].bias, 0)
+
+    def forward(self, x, cond):
+        """
+        x: [B, S, D]
+        cond: [S, D]
+        """
+        outputs = {}
+        gamma1, beta1, alpha1, gamma2, beta2, alpha2 = self.adamlp(cond).chunk(6, dim=-1)
+        res = x
+        x = self.ln1(x) * (1 + gamma1.unsqueeze(1)) + beta1.unsqueeze(1)
+        x = self.mhsa(x)
+        if self.return_attscores:
+            outputs['scores'] = x.scores
+        x = self.dropout(x) * (alpha1.unsqueeze(1)) + res
+        res = x 
+        x = self.ln2(x) * (1 + gamma2.unsqueeze(1)) + beta2.unsqueeze(1)
+        x = self.mlp(x) 
+        if self.lb_weights:
+            outputs['gate_weights'], outputs['gate_idx'] = x.gate_weights, x.gate_idx
+        x = self.dropout(x) * (alpha2.unsqueeze(1)) + res
+        for k, v in outputs.items():
+            x.__setattr__(k, v)
+        return x
 
 
 class ViT(nn.Module):
@@ -362,7 +405,7 @@ class ViT(nn.Module):
         H, and W are used to infer patch counts.
     patch_dim:
         Width/height of each square patch.
-    d_emb:
+    hidden_dim:
         Total embedding dimension.
     n_heads:
         Number of attention heads.
@@ -409,7 +452,7 @@ class ViT(nn.Module):
             self,
             x_dim: tuple[int, int, int, int],
             patch_dim: int,
-            d_emb: int,
+            hidden_dim: int,
             n_heads: int,
             n_blocks: int,
             n_class: int,
@@ -425,17 +468,19 @@ class ViT(nn.Module):
             return_moescores: bool = False,
             num_exp: int = 1,
             lb_loss: bool = False,
+            DiT: bool = False,
     ) -> None:
         super().__init__()
         assert (not lb_loss) or num_exp > 1, 'use num_exp > 1 to enable lb_loss'
         self.input_size = x_dim
-        self.d_emb = d_emb
+        self.hidden_dim = hidden_dim
         self.return_attscores = return_attscores
         self.return_moescores = return_moescores
         self.disable_head = disable_head
         self.learned_encodings = learned_encodings
         self.lb_loss = lb_loss
         self.num_exp = num_exp
+        self.DiT = DiT
 
         _, self.x_c, self.x_h, self.x_w = x_dim
         self.p_dim = patch_dim
@@ -445,20 +490,21 @@ class ViT(nn.Module):
             "Input height/width should be divisible by patch_dim"
         )
 
-        self.embedding = nn.Linear((self.p_dim ** 2) * self.x_c, d_emb)
+        self.embedding = nn.Linear((self.p_dim ** 2) * self.x_c, hidden_dim)
         if class_token:
-            self.cls = nn.Parameter(torch.zeros(1, 1, d_emb))
+            self.cls = nn.Parameter(torch.zeros(1, 1, hidden_dim))
             nn.init.trunc_normal_(self.cls, std=0.02)
             self.n_patch += 1
         if learned_encodings:
-            self.pos_emb = nn.Parameter(torch.zeros(1, self.n_patch, d_emb))
+            self.pos_emb = nn.Parameter(torch.zeros(1, self.n_patch, hidden_dim))
             nn.init.trunc_normal_(self.pos_emb, std=0.02)
         else:
-            self.pos_emb = nn.Parameter(get_2d_sincos_pos_embed(d_emb, self.x_h // self.p_dim, self.class_token),
+            self.pos_emb = nn.Parameter(get_2d_sincos_pos_embed(hidden_dim, self.x_h // self.p_dim, self.class_token),
                                         requires_grad=False)
+        mod = TransformerBlock if not DiT else DiTBlock
         self.blocks = nn.ModuleList(
-            TransformerBlock(
-                d_emb=d_emb,
+            mod(
+                hidden_dim=hidden_dim,
                 n_heads=n_heads,
                 mlp_factor=mlp_factor,
                 act_fn=act_fn,
@@ -468,86 +514,41 @@ class ViT(nn.Module):
                 return_attscores=return_attscores,
                 num_exp=num_exp,
                 lb_weights=self.lb_loss
-            )
+            ) 
             for _ in range(n_blocks)
         )
-        self.output = MLP(d_emb, [d_emb * 2], n_class) if not disable_head else None
+        self.output = MLP(hidden_dim, [hidden_dim * 2], n_class) if not disable_head else None
 
         self.apply(self._init_weights)
 
     def forward(self, x: Tensor) -> Union[
         Union[tuple[Union[Tensor, Any], Tensor], tuple[Union[Tensor, Any], float], Tensor], Any]:
         B = x.shape[0]
-        x = self.patchify(x)
+        x = patchify(x, self.p_dim)
         x = self.embedding(x)
         if self.class_token:
             x = torch.cat([self.cls.expand(B, -1, -1), x], dim=1)
         x = x + self.pos_emb
 
-        att_scores = []
-        lb_losses = []
-        moe_scores = []
+        outputs = {'att_scores': [], 'lb_losses': [], 'moe_scores': []}
         for block in self.blocks:
-            x = block(x)
+            x = block(x) if not self.DiT else block(x, x[0, 0, :])
 
             if self.return_attscores:
-                att_scores.append(x.scores)
+                outputs['att_scores'].append(x.scores)
             if self.lb_loss:
-                lb_losses.append(block.mlp.load_balancing_loss(x.gate_weights, x.gate_idx, block.mlp.num_experts))
+                loss = block.mlp.load_balancing_loss(x.gate_weights, x.gate_idx, block.mlp.num_experts)
+                outputs['lb_losses'].append(loss)
             if self.return_moescores:
-                moe_scores.append(x.gate_idx)
+                outputs['moe_scores'].append(x.gate_idx)
 
         x = x[:, 0] if self.class_token else x.mean(dim=1)
         x = self.output(x) if not self.disable_head else x
 
-        if self.return_attscores: x.__setattr__('att_scores', torch.stack(att_scores, dim=1))
-        if self.lb_loss: x.__setattr__('lb_loss', (sum(lb_losses) / len(lb_losses)))
-        if self.return_moescores: x.__setattr__('moe_scores', torch.stack(moe_scores, dim=1))
+        if self.return_attscores: x.__setattr__('att_scores', torch.stack(outputs['att_scores'], dim=1))
+        if self.lb_loss: x.__setattr__('lb_loss', (sum(outputs['lb_losses']) / len(outputs['lb_losses'])))
+        if self.return_moescores: x.__setattr__('moe_scores', torch.stack(outputs['moe_scores'], dim=1))
         return x
-
-    def patchify(self, imgs: Tensor) -> Tensor:
-        """
-        Convert a batch of images to flattened patches.
-
-        Args:
-            imgs: Tensor of shape [B, C, H, W]
-
-        Returns:
-            patches: Tensor of shape [B, n_patches, patch_size^2 * C]
-                     where n_patches = (H//p) * (W//p) and p = self.p_dim
-        """
-        # basic shape checks
-        B, C, H, W = imgs.shape
-        p = self.p_dim
-
-        gh = H // p
-        gw = W // p
-
-        patches = imgs.reshape(B, C, gh, p, gw, p)
-        patches = patches.permute(0, 2, 4, 3, 5, 1)
-        patches = patches.reshape(B, gh * gw, p * p * C)
-        return patches.contiguous()
-
-    def depatchify(self, patches: Tensor) -> Tensor:
-        """
-        Inverse of patchify: reconstruct images from flattened patches.
-
-        Args:
-            patches: Tensor of shape [B, n_patches, patch_size^2 * C]
-
-        Returns:
-            imgs: Tensor of shape [B, C, H, W]
-        """
-        B, S, D = patches.shape
-        p = self.p_dim
-        C = self.x_c
-        gh = self.x_h // p
-        gw = self.x_w // p
-
-        patches = patches.reshape(B, gh, gw, p, p, C)
-        patches = patches.permute(0, 5, 1, 3, 2, 4)
-        imgs = patches.reshape(B, C, gh * p, gw * p)
-        return imgs.contiguous()
 
     @staticmethod
     def _init_weights(m: nn.Module) -> None:
@@ -558,20 +559,48 @@ class ViT(nn.Module):
         elif isinstance(m, nn.Parameter):
             nn.init.trunc_normal_(m, std=0.02)
 
+class DiT(nn.Module):
+    """
+    Full DiT model with multiple DiTBlocks
+    """
+    def __init__(self, hidden_dim, n_heads, n_blocks, mlp_factor=4, **kwargs):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.blocks = nn.ModuleList([
+            DiTBlock(hidden_dim, n_heads, mlp_factor, **kwargs)
+            for _ in range(n_blocks)
+        ])
+    
+    def forward(self, x, cond):
+        """
+        x: [B, S, D] - sequence of patch embeddings
+        cond: [B, D] - conditioning vector (time + class)
+        """
+        for block in self.blocks:
+            x = block(x, cond)
+        return x
+
+
+                 
+
 
 if __name__ == '__main__':
-    inp = torch.randn(64, 1, 28, 28)
-    model = ViT([64, 1, 28, 28],
-                7,
-                64,
-                4,
-                2,
-                10,
-                return_attscores=False,
-                disable_head=False,
-                class_token=True,
-                learned_encodings=False,
-                num_exp=5,
-                lb_loss=True)
-    model(inp)
-    print()
+    # inp = torch.randn(64, 1, 28, 28)
+    # model = ViT([64, 1, 28, 28],
+    #             7,
+    #             64,
+    #             4,
+    #             2,
+    #             10,
+    #             return_attscores=False,
+    #             disable_head=False,
+    #             class_token=True,
+    #             learned_encodings=False,
+    #             num_exp=5,
+    #             lb_loss=True,
+    #             DiT=True)
+    inp = torch.randn(13, 64, 256)
+    cond = torch.randn(64, 256)
+    model = DiTBlock(256, 4)
+    out = model(inp, cond)
+    print(out.shape)

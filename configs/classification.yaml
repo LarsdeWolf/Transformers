@@ -1,0 +1,4 @@
+input_dim: 1024
+hidden_dims: [100, 80]
+output_dim: 10
+flatten: True

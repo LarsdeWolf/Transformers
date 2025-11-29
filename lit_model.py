@@ -5,6 +5,7 @@ from torch import Tensor
 from typing import Any
 import matplotlib.pyplot as plt
 from model import ViT
+from utils import *
 
 
 class LitClassification(L.LightningModule):
@@ -12,22 +13,13 @@ class LitClassification(L.LightningModule):
 
     def __init__(
             self,
-            model: nn.Module,
+            encoder: nn.Module,
             loss_fn: nn.Module = nn.CrossEntropyLoss(),
-            lr: float = 3e-4,
-            wd: float = 0.3,
-            epochs: int = 100,
-            input_shape: tuple[int, int, int, int] = None,
-            scheduler: nn.Module = None,
     ) -> None:
         super().__init__()
-        self.save_hyperparameters(ignore=["model", "loss_fn", "scheduler"])
-        self.model = model
+        self.save_hyperparameters(ignore=["encoder", "loss_fn"])
+        self.model = encoder
         self.loss_fn = loss_fn
-        self.scheduler = scheduler
-
-        if input_shape is not None:
-            self.example_input_array = torch.randn(input_shape)
         self.lb = isinstance(self.model, ViT) and getattr(self.model, "lb_loss", False)
 
     def forward(self, x: Tensor) -> Tensor:
@@ -40,7 +32,6 @@ class LitClassification(L.LightningModule):
         acc = (x.argmax(dim=1) == y).float().mean()
         if self.lb:
             loss.lb = x.lb_loss
-        if self.model.return_moescores:
             tb = self.logger.experiment
             for i in range(self.model.num_exp):
                 tb.add_scalar(f'Expert_Load/{stage}-exp{i}',
@@ -76,15 +67,14 @@ class LitClassification(L.LightningModule):
 
     def on_before_optimizer_step(self, optimizer):
         """Compute and log global gradient norm across all parameters."""
-        # L2 norm
         grads = [p.grad.detach().flatten() for p in self.model.parameters() if p.grad is not None]
-        if grads:  # avoid empty list
+        if grads: 
             all_grads = torch.cat(grads)
             total_norm = all_grads.norm(2)  
             self.log("grad_norm/global", total_norm, on_step=True, on_epoch=True, prog_bar=False)
 
     def on_fit_start(self) -> None:
-        if self.model.return_moescores:
+        if self.lb:
             tb = self.logger.experiment
             tb.add_custom_scalars({
                 "Expert_Load": {
@@ -95,20 +85,7 @@ class LitClassification(L.LightningModule):
             })
 
     def configure_optimizers(self) -> dict[str, Any]:
-        optimizer = torch.optim.AdamW(
-            self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.wd
-        )
-
-        if self.scheduler is None:
-            return {"optimizer": optimizer}
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": self.scheduler,
-                "interval": "epoch",
-                "frequency": 1,
-            },
-        }
+        return super().configure_optimizers()
 
 
 class LitMaskedAutoEncoder(L.LightningModule):
@@ -131,23 +108,23 @@ class LitMaskedAutoEncoder(L.LightningModule):
         self.save_hyperparameters(ignore=["encoder", "decoder"])
         self.encoder = encoder
         self.decoder = decoder
-        self.mask_ratio = mask_ratio
         self.scheduler = scheduler
-        self.enc_lb = isinstance(self.encoder, ViT) and getattr(self.encoder, "lb_loss", False)
-        self.dec_lb = isinstance(self.decoder, ViT) and getattr(self.encoder, "lb_loss", False)
         self.mean = mean
-        self.std = std
+        self.std = std  
 
         self.loss_fn = nn.MSELoss()
-        self.enc_todec = nn.Linear(self.encoder.d_emb, self.decoder.d_emb)
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, self.decoder.d_emb))
+        self.enc_todec = nn.Linear(self.encoder.hidden_dim, self.decoder.hidden_dim)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, self.decoder.hidden_dim))
+        self.to_pix = nn.Linear(self.decoder.hidden_dim, (self.encoder.p_dim ** 2) * self.encoder.x_c)
+
+        self.train_epoch_outputs = [] if save_train > 0 else None
+        self.val_epoch_outputs = [] if save_val > 0 else None
+        self.test_epoch_outputs = [] if save_test > 0 else None
+
+        self.enc_lb = isinstance(self.encoder, ViT) and getattr(self.encoder, "lb_loss", False)
+        self.dec_lb = isinstance(self.decoder, ViT) and getattr(self.encoder, "lb_loss", False)
+
         nn.init.trunc_normal_(self.mask_token, std=0.02)
-        self.to_pix = nn.Linear(self.decoder.d_emb, (self.encoder.p_dim ** 2) * self.encoder.x_c)
-
-        self.train_epoch_outputs = []
-        self.val_epoch_outputs = []
-        self.test_epoch_outputs = []
-
         self.apply(self._init_weights)
 
     @staticmethod
@@ -156,14 +133,6 @@ class LitMaskedAutoEncoder(L.LightningModule):
             nn.init.xavier_uniform_(m.weight)
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
-
-    @staticmethod
-    def to_img(x):
-        x = x.detach().cpu().clamp(0, 1)
-        if x.shape[0] == 1:
-            return x[0].numpy() 
-        else:
-            return x.permute(1, 2, 0).numpy()
 
     def forward(self, x: Tensor):
         """
@@ -175,19 +144,28 @@ class LitMaskedAutoEncoder(L.LightningModule):
             n_mask       -- number of masked patches
         """
 
-        patches = self.encoder.patchify(x)   
-        x = self.encoder.embedding(patches)  
-        x = x + self.encoder.pos_emb  
-
+        x = patchify(x, self.encoder.p_dim)
+        x = self.encoder.embedding(x)  
         B, N, D = x.shape
+
+        if self.encoder.class_token:
+            x = torch.cat([self.encoder.cls.expand(B, -1, -1), x], dim=1)  
+        x = x + self.encoder.pos_emb
+
         n_mask = int(N * self.mask_ratio)
         idx_shuffle = torch.rand(B, N, device=x.device).argsort(dim=1)
         idx_restore = idx_shuffle.argsort(dim=1)
 
         # keep only visible patches
-        x = torch.gather(
-            x, dim=1, index=idx_shuffle[:, n_mask:].unsqueeze(-1).expand(-1, -1, D)
-        )  
+        if self.encoder.class_token:
+            # Exclude class token from selection
+            x = torch.cat([x[:, :1], torch.gather(
+            x[:, 1:], dim=1, index=idx_shuffle[:, n_mask:].unsqueeze(-1).expand(-1, -1, D)
+        )], dim=1)
+        else:
+            x = torch.gather(
+                x, dim=1, index=idx_shuffle[:, n_mask:].unsqueeze(-1).expand(-1, -1, D)
+            )  
         if self.enc_lb:
             enc_lb_losses, enc_gate_scores = [], []
 
@@ -197,8 +175,10 @@ class LitMaskedAutoEncoder(L.LightningModule):
                 enc_lb_losses.append(block.mlp.load_balancing_loss(
                     x.gate_weights, x.gate_idx, block.mlp.num_experts
                 ))
-                enc_gate_scores.append(x_vis.gate_idx)
+                enc_gate_scores.append(x.gate_idx)
 
+        if self.encoder.class_token:
+            x = x[:, 1:]  # Discard the class token
 
         x = self.enc_todec(x)  
         mask_tokens = self.mask_token.repeat(B, n_mask, 1)  
@@ -208,6 +188,9 @@ class LitMaskedAutoEncoder(L.LightningModule):
             dim=1,
             index=idx_restore.unsqueeze(-1).expand(-1, -1, self.decoder.d_emb)
         )
+
+        if self.decoder.class_token:
+            x = torch.cat([self.decoder.cls.expand(B, -1, -1), x], dim=1)  
         x = x + self.decoder.pos_emb
         if self.dec_lb:
             dec_lb_losses, dec_gate_scores = [], []
@@ -219,6 +202,9 @@ class LitMaskedAutoEncoder(L.LightningModule):
                     x.gate_weights, x.gate_idx, block.mlp.num_experts
                 ))
                 dec_gate_scores.append(x.gate_idx)
+
+        if self.decoder.class_token:
+            x = x[:, 1:]  # Discard the decoder's class token
 
         x = self.to_pix(x)  
 
@@ -241,7 +227,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
                               dim=1,
                               index=idx_shuffle.unsqueeze(-1).expand(-1, -1, preds.shape[-1]))[:, :n_mask, :]
 
-        gt = self.encoder.patchify(x)
+        gt = patchify(x, self.encoder.p_dim)
         gt = torch.gather(gt,
                           dim=1,
                           index=idx_shuffle.unsqueeze(-1).expand(-1, -1, preds.shape[-1]))[:, :n_mask, :]
@@ -265,7 +251,8 @@ class LitMaskedAutoEncoder(L.LightningModule):
                               self.global_step)
 
         if len(self.train_epoch_outputs) < 1 and self.hparams.save_train > 0:
-            preds = self.encoder.depatchify(preds)
+            preds = depatchify(preds, self.encoder.p_dim, self.encoder.x_c, self.encoder.x_h,
+                               self.encoder.x_w)
             self.train_epoch_outputs.append([preds[:self.hparams.save_train].detach().cpu(),
                                              x[:self.hparams.save_train].detach().cpu()])
         return loss
@@ -278,7 +265,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
                               dim=1,
                               index=idx_shuffle.unsqueeze(-1).expand(-1, -1, preds.shape[-1]))[:, :n_mask, :]
 
-        gt = self.encoder.patchify(x)
+        gt = patchify(x, self.encoder.p_dim)
         gt = torch.gather(gt,
                           dim=1,
                           index=idx_shuffle.unsqueeze(-1).expand(-1, -1, preds.shape[-1]))[:, :n_mask, :]
@@ -298,7 +285,8 @@ class LitMaskedAutoEncoder(L.LightningModule):
                               self.global_step)
 
         if len(self.val_epoch_outputs) < 1 and self.hparams.save_val > 0:
-            preds = self.encoder.depatchify(preds)
+            preds = depatchify(preds, self.encoder.p_dim, self.encoder.x_c, self.encoder.x_h,
+                               self.encoder.x_w)
             self.val_epoch_outputs.append([preds[:self.hparams.save_val].detach().cpu(),
                                            x[:self.hparams.save_val].detach().cpu()])
         return loss
@@ -311,7 +299,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
                               dim=1,
                               index=idx_shuffle.unsqueeze(-1).expand(-1, -1, preds.shape[-1]))[:, :n_mask, :]
 
-        gt = self.encoder.patchify(x)
+        gt = patchify(x, self.encoder.p_dim)
         gt = torch.gather(gt,
                           dim=1,
                           index=idx_shuffle.unsqueeze(-1).expand(-1, -1, preds.shape[-1]))[:, :n_mask, :]
@@ -331,7 +319,8 @@ class LitMaskedAutoEncoder(L.LightningModule):
                               self.global_step)
 
         if len(self.test_epoch_outputs) < 1 and self.hparams.save_test > 0:
-            preds = self.encoder.depatchify(preds)
+            preds = depatchify(preds, self.encoder.p_dim, self.encoder.x_c, self.encoder.x_h,
+                               self.encoder.x_w)
             self.test_epoch_outputs.append([preds[:self.hparams.save_test].detach().cpu(),
                                             x[:self.hparams.save_test].detach().cpu()])
 
@@ -369,8 +358,6 @@ class LitMaskedAutoEncoder(L.LightningModule):
 
             tensorboard = self.logger.experiment
             fig, axs = plt.subplots(2, all_preds.shape[0] + 1)
-            print(f'{all_preds.shape[0]}')
-            print(range(self.hparams.save_val))
             for i in range(min(self.hparams.save_val, all_preds.shape[0])):
                 axs[0, i].imshow(self.to_img(all_preds[i]))
                 axs[1, i].imshow(self.to_img(all_gt[i]))
@@ -390,8 +377,6 @@ class LitMaskedAutoEncoder(L.LightningModule):
 
             tensorboard = self.logger.experiment
             fig, axs = plt.subplots(2, all_preds.shape[0] + 1)
-            print(f'{all_preds.shape[0]}')
-            print(self.hparams.save_test)
             for i in range(min(self.hparams.save_test, all_preds.shape[0])):
                 axs[0, i].imshow(self.to_img(all_preds[i]))
                 axs[1, i].imshow(self.to_img(all_gt[i]))
@@ -451,19 +436,297 @@ class LitMaskedAutoEncoder(L.LightningModule):
 
         img_denorm = (img_tensor * std) + mean
         return img_denorm
+    
+
+class LitClassCondDiffusion(L.LightningModule):
+    def __init__(self,
+                 input_shape: tuple[int, int, int, int],
+                 p_dim: int,
+                 model: nn.Module,
+                 n_class: int,
+                 vae: nn.Module = None,
+                 scheduler: nn.Module = None,
+                 noise_scheduler: nn.Module = NoiseScheduler(NoiseSchedulerConfig()),
+                 epochs: int = 100,
+                 T: int = 1000,
+                 save_train: int = 10,
+                 save_val: int = 0,
+                 save_test: int = 10,
+                 **kwargs
+    ):
+        super().__init__()
+        self.save_hyperparameters(ignore=["vae", "model", "scheduler", "noise_scheduler"])
+        self.vae = vae
+        self.model = model   
+        self.scheduler = scheduler
+        self.noise_scheduler = noise_scheduler
+        self.hidden_dim = model.hidden_dim
+        self.T = T
+        self.p_dim = p_dim
+
+        B, C, H, W = input_shape
+        self.C, self.H, self.W = C, H, W
+        
+        # Embedding layers
+        self.label_emb = nn.Embedding(n_class, self.hidden_dim)
+        self.patch_emb = nn.Linear((p_dim ** 2) * C, self.hidden_dim) 
+        self.pos_enc = nn.Parameter(
+            get_2d_sincos_pos_embed(self.hidden_dim, H // p_dim, False).unsqueeze(0),
+            requires_grad=False
+        )
+        
+        # Output layers - predict NOISE
+        self.final_ln = nn.LayerNorm(self.hidden_dim, elementwise_affine=False)
+        self.final_linear = nn.Linear(self.hidden_dim, (p_dim ** 2) * C)
+        
+        # Zero-init final layer (DiT paper recommendation)
+        nn.init.constant_(self.final_linear.weight, 0)
+        nn.init.constant_(self.final_linear.bias, 0)
+
+        # Noise schedule
+        self.alphas = noise_scheduler.alphas
+        self.betas = noise_scheduler.betas
+        self.alpha_bar = noise_scheduler.alpha_bar
+
+        self.train_epoch_outputs = [] if save_train > 0 else None
+        self.val_epoch_outputs = [] if save_val > 0 else None
+        self.test_epoch_outputs = [] if save_test > 0 else None
+    
+    def forward(self, x_t, t, cond):
+        """
+        Predict noise from noisy image
+        Args:
+            x_t: noisy image [B, C, H, W]
+            t: timestep [B]
+            cond: class labels [B]
+        Returns:
+            predicted noise [B, C, H, W]
+        """
+        B = x_t.shape[0]
+        
+        # Patchify and embed
+        x = patchify(x_t, self.p_dim)  # [B, N, patch_dim^2 * C]
+        x = self.patch_emb(x)           # [B, N, D]
+        x = x + self.pos_enc            # Add pos encoding
+        
+        # Time + class conditioning
+        time_emb = time_embed(t, self.hidden_dim)  # [B, D]
+        label_emb = self.label_emb(cond)            # [B, D]
+        cond_emb = time_emb + label_emb             # [B, D]
+        
+        # Pass through DiT blocks
+        x = self.model(x, cond_emb)  # [B, N, D]
+        
+        # Output: predict noise
+        x = self.final_ln(x)          # [B, N, D]
+        x = self.final_linear(x)      # [B, N, patch_dim^2 * C]
+        
+        # Depatchify
+        eps_pred = depatchify(x, self.p_dim, self.C, self.H, self.W)  # [B, C, H, W]
+        
+        return eps_pred
+    
+    def apply_noise(self, x0, t, noise=None):
+        """Add noise: x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * noise"""
+        if noise is None:
+            noise = torch.randn_like(x0)
+        
+        abar = self.alpha_bar[t].view(-1, 1, 1, 1)
+        x_t = torch.sqrt(abar) * x0 + torch.sqrt(1 - abar) * noise
+        return x_t, noise
+
+    @torch.no_grad()
+    def sample(self, cond, num_steps=50):
+        """DDPM sampling"""
+        B = cond.shape[0]
+        device = cond.device
+        
+        # Start from pure noise
+        x_t = torch.randn(B, self.C, self.H, self.W, device=device)
+        
+        # Timesteps to use
+        step_size = 1
+        timesteps = list(range(0, self.T, step_size))[::-1]
+        
+        for i, t in enumerate(timesteps):
+            t_batch = torch.full((B,), t, device=device, dtype=torch.long)
+            
+            # Predict noise
+            eps_pred = self.forward(x_t, t_batch, cond)
+            
+            # Get schedule values
+            alpha_t = self.alphas[t]
+            alpha_bar_t = self.alpha_bar[t]
+            beta_t = self.betas[t]
+            
+            if t > 0:
+                alpha_bar_prev = self.alpha_bar[t-1]
+                # More stable posterior mean calculation
+                mu = (1 / torch.sqrt(alpha_t)) * (x_t - (beta_t / torch.sqrt(1 - alpha_bar_t)) * eps_pred)
+                # Posterior variance
+                beta_tilde_t = (1 - alpha_bar_prev) / (1 - alpha_bar_t) * beta_t
+                sigma_t = torch.sqrt(beta_tilde_t)
+                
+                # Add noise
+                noise = torch.randn_like(x_t)
+                x_t = mu + sigma_t * noise
+            else:
+                x_t = (1 / torch.sqrt(alpha_t)) * (x_t - (beta_t / torch.sqrt(1 - alpha_bar_t)) * eps_pred)
+        
+        # Decode and denormalize
+        x_t = x_t.clamp(-1, 1)
+        x_t = self.vae.decode(x_t) if self.vae else x_t
+        x_t = (x_t * 0.5) + 0.5  
+        return x_t
+
+    def training_step(self, batch, batch_idx):
+        x, cond = batch
+        B = x.shape[0]
+
+        # Encode to latent if using VAE
+        x = self.vae.encode(x) if self.vae else x
+        
+        # Sample random timesteps
+        t = torch.randint(0, self.T, (B,), device=x.device, dtype=torch.long)
+        
+        # Add noise
+        x_t, noise = self.apply_noise(x, t)
+        
+        # Predict noise
+        eps_pred = self.forward(x_t, t, cond)
+        
+        # Simple MSE loss on noise prediction
+        loss = F.mse_loss(eps_pred, noise)
+        
+        self.log("Loss/train", loss, on_step=True, on_epoch=True, prog_bar=True)
+        
+        # Generate samples periodically
+        if self.hparams.save_train > 0 and self.current_epoch % 25 == 0 and len(self.train_epoch_outputs) < 1:
+            with torch.no_grad():
+                preds = self.sample(cond[:self.hparams.save_train])
+                gt_denorm = (batch[0][:self.hparams.save_train] * 0.5) + 0.5  # Denormalize GT
+                self.train_epoch_outputs.append([
+                    preds.detach().cpu(),
+                    gt_denorm.detach().cpu()
+                ])
+        
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x, cond = batch
+        B = x.shape[0]
+
+        # Encode to latent if using VAE
+        x = self.vae.encode(x) if self.vae else x
+        
+        # Sample random timesteps
+        t = torch.randint(0, self.T, (B,), device=x.device, dtype=torch.long)
+        
+        # Add noise
+        x_t, noise = self.apply_noise(x, t)
+        
+        # Predict noise
+        eps_pred = self.forward(x_t, t, cond)
+        
+        # Simple MSE loss on noise prediction
+        loss = F.mse_loss(eps_pred, noise)
+        
+        self.log("Loss/val", loss, on_step=True, on_epoch=True, prog_bar=True)
+        
+        # Generate samples periodically
+        if self.hparams.save_val > 0 and self.current_epoch % 25 == 0 and len(self.val_epoch_outputs) < 1:
+            with torch.no_grad():
+                preds = self.sample(cond[:self.hparams.save_train])
+                gt_denorm = (batch[0][:self.hparams.save_train] * 0.5) + 0.5  # Denormalize GT
+                self.val_epoch_outputs.append([
+                    preds.detach().cpu(),
+                    gt_denorm.detach().cpu()
+                ])
+    
+    def on_train_epoch_end(self):
+        if self.hparams.save_train > 0 and self.current_epoch % 10 == 0 and self.train_epoch_outputs:
+            all_preds = torch.cat([x[0] for x in self.train_epoch_outputs], dim=0)
+            all_gt = torch.cat([x[1] for x in self.train_epoch_outputs], dim=0)
+
+            tensorboard = self.logger.experiment
+            n_imgs = min(self.hparams.save_train, all_preds.shape[0])
+            fig, axs = plt.subplots(2, n_imgs, figsize=(2*n_imgs, 4))
+            
+            if n_imgs == 1:
+                axs = axs.reshape(2, 1)
+
+            for i in range(n_imgs):
+                pred_img = to_img(all_preds[i])
+                gt_img = to_img(all_gt[i])
+                
+                if self.C == 1:
+                    axs[0, i].imshow(pred_img, cmap='gray', vmin=0, vmax=1)
+                    axs[1, i].imshow(gt_img, cmap='gray', vmin=0, vmax=1)
+                else:
+                    axs[0, i].imshow(pred_img)
+                    axs[1, i].imshow(gt_img)
+                    
+                axs[0, i].axis("off")
+                axs[1, i].axis("off")
+                if i == 0:
+                    axs[0, i].set_title("Generated", fontsize=10)
+                    axs[1, i].set_title("Ground Truth", fontsize=10)
+
+            plt.tight_layout()
+            tensorboard.add_figure(f'Samples/Epoch_{self.current_epoch}', fig, self.current_epoch)
+            plt.close()
+            self.train_epoch_outputs.clear() 
+    
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(), 
+            lr=self.hparams.get('lr', 5e-4), 
+            weight_decay=self.hparams.get('wd', 0.0),
+            betas=(0.9, 0.999)
+        )
+
+        if self.scheduler is None:
+            return {"optimizer": optimizer}
+        scheduler = self.scheduler(optimizer, T_max=self.hparams.epochs)
+        return {
+            "optimizer": optimizer,
+            # "lr_scheduler": {
+            #     "scheduler": scheduler,
+            #     "interval": "epoch",
+            #     "frequency": 1,
+            # }
+            }
+
 
 
 if __name__ == '__main__':
     from model import *
 
-    model = LitMaskedAutoEncoder(
-        ViT([64, 1, 28, 28], 7, 64, 4, 2, 10, return_scores=False,
-            disable_head=True, class_token=False),
-        ViT([64, 1, 28, 28], 7, 64, 4, 2, 10, return_scores=False,
-            disable_head=True, class_token=False)
-    )
-    inp = torch.randn(64, 1, 28, 28)
-    inp = torch.arange(28 * 28, dtype=torch.float32).reshape(1, 1, 28, 28).repeat(64, 1, 1, 1)
-    out = model(inp)
-    print()
+    # model = LitMaskedAutoEncoder(
+    #     ViT([64, 1, 28, 28], 7, 64, 4, 2, 10, return_scores=False,
+    #         disable_head=True, class_token=False),
+    #     ViT([64, 1, 28, 28], 7, 64, 4, 2, 10, return_scores=False,
+    #         disable_head=True, class_token=False)
+    # )
+    shape = (64, 1, 32, 32)
+    inp = torch.randn(shape)
+    schedule = NoiseScheduler(NoiseSchedulerConfig())
+    model = LitClassCondDiffusion(
+        input_shape=shape,
+        p_dim=4,
+        vae=None,
+        model=DiT(
+            hidden_dim=192,
+            n_heads=6,
+            n_blocks=6,
+            mlp_factor=4,
+            act_fn=nn.GELU,
+            att_dropout=0.0,
+            mlp_dropout=0.0,
+        ),
+        n_class=10,
+        noise_scheduler=schedule,
 
+    )
+    out = model.training_step((inp, torch.tensor(0)), 0)
+    print()

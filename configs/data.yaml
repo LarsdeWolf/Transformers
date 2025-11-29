@@ -1,0 +1,31 @@
+flowers102:
+  cls: "datasets.Flowers102"
+  num_classes: 102
+  resize: [224, 224]
+  mean: [0.4330, 0.3819, 0.2964]
+  std: [0.2923, 0.2439, 0.2712]
+  splits: ["train", "val", "test"]
+
+mnist:
+  cls: "datasets.MNIST"
+  num_classes: 10
+  resize: [32, 32]
+  mean: [0.1307]
+  std: [0.3081]
+  splits: ["train", "test"]
+
+mnist_diff:
+  cls: "datasets.MNIST"
+  num_classes: 10
+  resize: [32, 32]
+  mean: [0.5]
+  std: [0.5]
+  splits: ["train", "test"]
+
+cifar10:
+  cls: "datasets.CIFAR10"
+  num_classes: 10
+  resize: [32, 32]
+  mean: [0.4914, 0.4822, 0.4465]
+  std: [0.2023, 0.1994, 0.2010]
+  splits: ["train", "test"]
