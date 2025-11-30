@@ -148,7 +148,6 @@ class NoiseScheduler(torch.nn.Module):
         alphas = 1.0 - betas
         alpha_bar = torch.cumprod(alphas, dim=0)
 
-        # register buffers so they move with .cuda(), and are saved in checkpoints
         self.register_buffer("betas", betas.float())
         self.register_buffer("alphas", alphas.float())
         self.register_buffer("alpha_bar", alpha_bar.float())

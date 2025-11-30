@@ -2,3 +2,9 @@ input_dim: 1024
 hidden_dims: [100, 80]
 output_dim: 10
 flatten: True
+
+python cli.py fit --model LitClassification --model.encoder model.MLP --model.encoder.input_dim 3072 --model.encoder.hidden_dims "[32, 64, 128]" --model.encoder.out_dim 10 --model.encoder.flatten True --data DataModule --data.name cifar10 --optimizer Adam --optimizer.lr=0.01 --lr_scheduler CosineAnnealingLR --lr_scheduler.T_max 100 --data.n_train 200
+
+python cli.py fit --model LitClassification --model.encoder ViT --model.encoder.x_dim "[1, 3, 32, 32]" --model.encoder.patch_dim 8 --model.encoder.hidden_dim 32 --model.encoder.n_heads 1 --model.encoder.n_blocks 1 --model.encoder.n_class 10 --data DataModule --data.name cifar10 --optimizer Adam --lr_scheduler CosineAnnealingLR --lr_scheduler.T_max 100 --data.n_train 200
+
+python cli.py fit --model LitClassCondDiffusion --model.n_class 10 --model.input_shape "[1, 1, 32, 32]" --model.p_dim 8 --model.model DiT --model.model.hidden_dim 120 --model.model.n_heads 2 --model.model.n_blocks 2 --data DataModule --data.name mnist --data.config_name mnist_diff --optimizer Adam --optimizer.lr=3e-4 --lr_scheduler CosineAnnealingLR --lr_scheduler.T_max 500 --data.n_train 120 --data.batch_size 16

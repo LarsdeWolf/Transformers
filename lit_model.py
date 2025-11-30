@@ -445,9 +445,7 @@ class LitClassCondDiffusion(L.LightningModule):
                  model: nn.Module,
                  n_class: int,
                  vae: nn.Module = None,
-                 scheduler: nn.Module = None,
                  noise_scheduler: nn.Module = NoiseScheduler(NoiseSchedulerConfig()),
-                 epochs: int = 100,
                  T: int = 1000,
                  save_train: int = 10,
                  save_val: int = 0,
@@ -455,10 +453,9 @@ class LitClassCondDiffusion(L.LightningModule):
                  **kwargs
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["vae", "model", "scheduler", "noise_scheduler"])
+        self.save_hyperparameters(ignore=["vae", "model", "noise_scheduler"])
         self.vae = vae
         self.model = model   
-        self.scheduler = scheduler
         self.noise_scheduler = noise_scheduler
         self.hidden_dim = model.hidden_dim
         self.T = T
@@ -564,8 +561,8 @@ class LitClassCondDiffusion(L.LightningModule):
                 # More stable posterior mean calculation
                 mu = (1 / torch.sqrt(alpha_t)) * (x_t - (beta_t / torch.sqrt(1 - alpha_bar_t)) * eps_pred)
                 # Posterior variance
-                beta_tilde_t = (1 - alpha_bar_prev) / (1 - alpha_bar_t) * beta_t
-                sigma_t = torch.sqrt(beta_tilde_t)
+                # beta_tilde_t = (1 - alpha_bar_prev) / (1 - alpha_bar_t) * beta_t
+                sigma_t = torch.sqrt(beta_t)
                 
                 # Add noise
                 noise = torch.randn_like(x_t)
@@ -677,25 +674,9 @@ class LitClassCondDiffusion(L.LightningModule):
             plt.close()
             self.train_epoch_outputs.clear() 
     
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self.parameters(), 
-            lr=self.hparams.get('lr', 5e-4), 
-            weight_decay=self.hparams.get('wd', 0.0),
-            betas=(0.9, 0.999)
-        )
 
-        if self.scheduler is None:
-            return {"optimizer": optimizer}
-        scheduler = self.scheduler(optimizer, T_max=self.hparams.epochs)
-        return {
-            "optimizer": optimizer,
-            # "lr_scheduler": {
-            #     "scheduler": scheduler,
-            #     "interval": "epoch",
-            #     "frequency": 1,
-            # }
-            }
+    def configure_optimizers(self) -> dict[str, Any]:
+        return super().configure_optimizers()
 
 
 
