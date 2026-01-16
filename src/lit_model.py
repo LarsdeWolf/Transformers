@@ -453,7 +453,7 @@ class LitClassCondDiffusion(L.LightningModule):
         self.save_hyperparameters(ignore=["vae", "model", "noise_scheduler"])
         self.vae = vae
         self.model = model   
-        noise_scheduler = NoiseScheduler(T, noise_scheduler)
+        noise_scheduler = NoiseScheduler(T, noise_scheduler, device=self.device)
         self.hidden_dim = model.hidden_dim
 
         _, self.C, self.H, self.W = input_shape

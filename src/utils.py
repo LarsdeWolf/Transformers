@@ -135,13 +135,13 @@ class NoiseScheduler(torch.nn.Module):
       - 'cosine'  (Improved DDPM, Nichol & Dhariwal)
     """
 
-    def __init__(self, T, schedule, beta_start=1e-4, beta_end=2e-2):
+    def __init__(self, T, schedule, device, beta_start=1e-4, beta_end=2e-2):
         super().__init__()
 
         if schedule == "linear":
-            betas = torch.linspace(beta_start, beta_end, T)
+            betas = torch.linspace(beta_start, beta_end, T, device=device)
         elif schedule == "cosine":
-            betas = self._cosine_schedule(T)
+            betas = self._cosine_schedule(T, device=device)
         else:
             raise ValueError(f"Unknown schedule: {schedule}")
 
@@ -153,7 +153,7 @@ class NoiseScheduler(torch.nn.Module):
         self.register_buffer("alpha_bar", alpha_bar.float())
 
     @staticmethod
-    def _cosine_schedule(T):
+    def _cosine_schedule(T, device):
         """
         Cosine schedule from:
         Improved Denoising Diffusion Probabilistic Models (Nichol & Dhariwal, 2021)
@@ -163,7 +163,7 @@ class NoiseScheduler(torch.nn.Module):
         steps = T + 1
         s = 0.008
 
-        t = torch.linspace(0, T, steps) / T
+        t = torch.linspace(0, T, steps, device=device) / T
         f_t = torch.cos((t + s) / (1 + s) * math.pi / 2) ** 2
 
         alpha_bar = f_t / f_t[0]      # normalize to 1 at step 0
