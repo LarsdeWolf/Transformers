@@ -10,5 +10,6 @@ dependencies = [
     "lightning",
     "matplotlib",
     "tensorboard",
-    "seaborn"
+    "seaborn",
+    "jsonargparse[signatures]>=4.27.7",
 ]
