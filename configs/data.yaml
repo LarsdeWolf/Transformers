@@ -29,3 +29,12 @@ cifar10:
   mean: [0.4914, 0.4822, 0.4465]
   std: [0.2023, 0.1994, 0.2010]
   splits: ["train", "test"]
+
+
+flowers102_diff:
+  cls: "datasets.Flowers102"
+  num_classes: 102
+  resize: [64, 64]
+  mean: [0.5, 0.5, 0.5]
+  std: [0.5, 0.5, 0.5]
+  splits: ["train", "val", "test"]

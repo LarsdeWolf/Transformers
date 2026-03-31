@@ -4,7 +4,8 @@ import torch
 import lightning as L
 from torchvision import datasets
 from torchvision.transforms import v2
-from torch.utils.data import random_split, DataLoader, Subset
+from torch.utils.data import random_split, DataLoader
+from hydra.utils import instantiate
 
 
 class DataModule(L.LightningDataModule):

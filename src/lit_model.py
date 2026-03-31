@@ -151,7 +151,7 @@ class LitMaskedAutoEncoder(L.LightningModule):
             x = torch.cat([self.encoder.cls.expand(B, -1, -1), x], dim=1)  
         x = x + self.encoder.pos_emb
 
-        n_mask = int(N * self.mask_ratio)
+        n_mask = int(N * self.hparams.mask_ratio)
         idx_shuffle = torch.rand(B, N, device=x.device).argsort(dim=1)
         idx_restore = idx_shuffle.argsort(dim=1)
 
@@ -453,7 +453,7 @@ class LitClassCondDiffusion(L.LightningModule):
         self.save_hyperparameters(ignore=["vae", "model", "noise_scheduler"])
         self.vae = vae
         self.model = model   
-        noise_scheduler = NoiseScheduler(T, noise_scheduler, device=self.device)
+        noise_scheduler = NoiseScheduler(T, noise_scheduler, device="cpu")
         self.hidden_dim = model.hidden_dim
 
         _, self.C, self.H, self.W = input_shape
@@ -471,9 +471,9 @@ class LitClassCondDiffusion(L.LightningModule):
         nn.init.constant_(self.final_linear.bias, 0)
 
         # Noise schedule
-        self.alphas = noise_scheduler.alphas
-        self.betas = noise_scheduler.betas
-        self.alpha_bar = noise_scheduler.alpha_bar
+        self.register_buffer("alphas", noise_scheduler.alphas)
+        self.register_buffer("betas", noise_scheduler.betas)
+        self.register_buffer("alpha_bar", noise_scheduler.alpha_bar)
 
         self.train_epoch_outputs = [] if save_train > 0 else None
         self.val_epoch_outputs = [] if save_val > 0 else None
@@ -656,7 +656,7 @@ if __name__ == '__main__':
     # )
     shape = (64, 1, 32, 32)
     inp = torch.randn(shape)
-    schedule = NoiseScheduler(NoiseSchedulerConfig())
+    schedule = NoiseScheduler(NoiseSchedulerConfig(), device='mps')
     model = LitClassCondDiffusion(
         input_shape=shape,
         p_dim=4,
